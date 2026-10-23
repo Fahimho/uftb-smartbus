@@ -1,0 +1,33 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.vite/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+service-account*.json
+
+# Firmware build artifacts
+firmware/.pio/
+firmware/.vscode/
+*.bin
+*.elf
+*.map
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs / evidence
+logs/
+*.log
