@@ -2,30 +2,23 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_MCP23X08.h>
-#include <MFRC522.h>
+#include "ResourceManager.h"
+#include "RFIDManager.h"
 
-// --- PIN DEFINITIONS ---
+// Pins
 #define I2C_SDA 5
 #define I2C_SCL 6
 #define OLED_ADDR 0x3C
-#define MCP_ADDR 0x20
+#define RFID_CS 3 
+#define RFID_RST -1 
 
-// Temporary pin for RFID CS since MCP23008 GP5 is missing
-#define RFID_CS_PIN 3 
-#define RFID_RST_PIN -1 
-
-// --- HARDWARE OBJECTS ---
+// Objects
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
-Adafruit_MCP23X08 mcp;
-MFRC522 rfid(RFID_CS_PIN, RFID_RST_PIN);
+ResourceManager resMgr;
+RFIDManager rfid(RFID_CS, RFID_RST, resMgr);
 
-// --- STATUS FLAGS ---
 bool oledOk = false;
-bool mcpOk = false;
-bool rfidOk = false;
 
-// Helper function to scan I2C
 bool checkI2CDevice(byte address) {
     Wire.beginTransmission(address);
     return (Wire.endTransmission() == 0);
@@ -33,89 +26,47 @@ bool checkI2CDevice(byte address) {
 
 void setup() {
     Serial.begin(115200);
-    delay(1000); 
-    
+    delay(1000);
     Serial.println("\n========================================");
-    Serial.println("UFTB SmartBus — Hardware Bring-up");
+    Serial.println("UFTB SmartBus - Advanced Drivers");
     Serial.println("========================================");
 
-    // 1. Initialize I2C Bus
     Wire.begin(I2C_SDA, I2C_SCL);
-    Serial.println("I2C Bus initialized (SDA:5, SCL:6)");
+    
+    // 1. Setup Resource Manager
+    resMgr.begin();
 
-    // 2. Check for OLED
+    // 2. Check OLED
     if (checkI2CDevice(OLED_ADDR)) {
         oledOk = true;
         display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-        Serial.println("[OK] OLED Display found at 0x3C");
-        
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
-        display.println("UFTB SmartBus");
-        display.println("Booting...");
-        display.display();
+        Serial.println("[OK] OLED Display found.");
     } else {
-        Serial.println("[ERROR] OLED Display NOT found at 0x3C.");
+        Serial.println("[ERROR] OLED Display NOT found.");
     }
 
-    // 3. Check for MCP23008
-    if (checkI2CDevice(MCP_ADDR)) {
-        mcpOk = true;
-        mcp.begin_I2C(MCP_ADDR);
-        Serial.println("[OK] MCP23008 found at 0x20");
+    // 3. Setup RFID using the Resource Manager
+    SPI.begin(7, 8, 9, RFID_CS);
+    if (rfid.begin()) {
+        Serial.println("[OK] MFRC522 RFID found.");
     } else {
-        Serial.println("[WARNING] MCP23008 NOT found at 0x20. Button/Buzzer/RFID-CS features disabled.");
-        Serial.println("          >>> SYSTEM CONTINUING IN DEGRADED MODE <<<");
-    }
-
-    // 4. Initialize MFRC522 (RFID)
-    SPI.begin(7, 8, 9, RFID_CS_PIN);
-    rfid.PCD_Init();
-    
-    byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-    if (version != 0x00 && version != 0xFF) {
-        rfidOk = true;
-        Serial.print("[OK] MFRC522 RFID Reader found. Version: 0x");
-        Serial.println(version, HEX);
-    } else {
-        Serial.println("[ERROR] MFRC522 RFID Reader NOT found.");
-    }
-
-    // 5. Update OLED with final status
-    if (oledOk) {
-        display.clearDisplay();
-        display.setCursor(0, 0);
-        display.println("UFTB SmartBus");
-        display.println("Hardware Status:");
-        display.print("OLED:  "); display.println(oledOk ? "OK" : "FAIL");
-        display.print("MCP:   "); display.println(mcpOk ? "OK" : "MISSING");
-        display.print("RFID:  "); display.println(rfidOk ? "OK" : "MISSING");
-        display.display();
+        Serial.println("[ERROR] MFRC522 RFID NOT found.");
     }
 
     Serial.println("========================================\n");
 }
 
 void loop() {
-    static unsigned long lastHeartbeat = 0;
-    if (millis() - lastHeartbeat > 5000) {
-        lastHeartbeat = millis();
-        Serial.printf("[Heartbeat] Uptime: %lu sec | OLED: %d | MCP: %d | RFID: %d\n", 
-                      millis() / 1000, oledOk, mcpOk, rfidOk);
+    // Try to scan an RFID card
+    rfid.scan();
+    
+    // Print heartbeat every 5 seconds
+    static unsigned long last = 0;
+    if (millis() - last > 5000) {
+        last = millis();
+        Serial.printf("[Heartbeat] OLED: %d | RFID: %d | SPI Owner: %s\n", 
+                      oledOk, rfid.isConnected(), resMgr.getCurrentOwner());
     }
-
-    // If RFID is connected, poll for cards
-    if (rfidOk) {
-        if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-            Serial.print("[RFID] Card detected! UID: ");
-            for (byte i = 0; i < rfid.uid.size; i++) {
-                Serial.print(rfid.uid.uidByte[i] < 0x10 ? " 0" : " ");
-                Serial.print(rfid.uid.uidByte[i], HEX);
-            }
-            Serial.println();
-            rfid.PICC_HaltA(); 
-        }
-    }
+    
+    delay(50);
 }
