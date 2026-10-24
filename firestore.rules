@@ -22,13 +22,9 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isAuthenticated() && (request.auth.uid == userId || isAdminOrOperator());
       allow create: if isAdminOrOperator();
-      
-      // Admins can update OTHER users. 
-      // Anyone can update their own profile, BUT they cannot change their 'role'.
       allow update: if (isAdminOrOperator() && request.auth.uid != userId) || 
                       (request.auth.uid == userId && 
                        request.resource.data.role == resource.data.role);
-                       
       allow delete: if hasRole('admin');
     }
 
@@ -61,7 +57,13 @@ service cloud.firestore {
       allow update, delete: if false; 
     }
 
-    // 6. DEFAULT DENY
+    // 6. CAPTURE PHOTO REQUESTS (MUST BE BEFORE DEFAULT DENY)
+    match /capturePhotoRequests/{requestId} {
+      allow read: if isAdminOrOperator();
+      allow create, update: if true; 
+    }
+
+    // 7. DEFAULT DENY (MUST BE LAST)
     match /{document=**} {
       allow read, write: if false;
     }

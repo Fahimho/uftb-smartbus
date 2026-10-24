@@ -9,6 +9,7 @@
 #include "InputManager.h"
 #include "NetworkManager.h"
 #include "GPSManager.h"
+#include "CameraManager.h" // <-- Import Camera Manager
 
 // --- PIN DEFINITIONS ---
 #define I2C_SDA 5
@@ -17,10 +18,9 @@
 #define GPS_RX 44
 
 // --- WIFI & BACKEND CONFIGURATION ---
-// CHANGE THESE TO MATCH YOUR SETUP!
 const char* WIFI_SSID = "Fahim Jisan";       
 const char* WIFI_PASS = "fj@174712";  
-const char* BACKEND_URL = "http://192.168.1.100:5000"; 
+const char* BACKEND_URL = "http://192.168.0.102:5000"; // <-- Changed to your PC IP
 const char* MQTT_SERVER = "nf9aa1f2.ala.asia-southeast1.emqxsl.com"; 
 const String BUS_ID = "BUS-01";
 
@@ -32,10 +32,13 @@ SDManager sd(SD_CS, resMgr);
 InputManager inputs(I2C_SDA, I2C_SCL);
 NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL, MQTT_SERVER);
 GPSManager gps(GPS_RX, -1);
+CameraManager camera; // <-- Add Camera
 
 bool oledOk = false;
 volatile bool hasNewMqttRequest = false;
 String mqttRequestMessage = "";
+volatile bool hasCameraRequest = false; 
+String cameraRequestId = "";
 
 bool checkI2CDevice(byte address) {
     Wire.beginTransmission(address);
@@ -79,6 +82,9 @@ void setup() {
     if (sd.begin()) Serial.println("[OK] microSD Card found.");
     else Serial.println("[ERROR] microSD Card NOT found.");
 
+    if (camera.begin()) Serial.println("[OK] Camera initialized.");
+    else Serial.println("[ERROR] Camera failed.");
+
     net.begin();
     
     net.setMessageCallback([](String payload) {
@@ -88,6 +94,13 @@ void setup() {
         mqttRequestMessage = payload.substring(start, end);
         hasNewMqttRequest = true;
     });
+
+    net.setCameraCallback([](String payload) {
+        int start = payload.indexOf(":") + 2;
+        int end = payload.indexOf("\"", start);
+        cameraRequestId = payload.substring(start, end);
+        hasCameraRequest = true;
+    });
     
     gps.begin();
     
@@ -95,7 +108,26 @@ void setup() {
 }
 
 void loop() {
-    // 1. Handle MQTT Requests safely
+    if (hasCameraRequest) {
+        hasCameraRequest = false;
+        Serial.println("[CAMERA] Capture requested! ID: " + cameraRequestId);
+        
+        String base64Image = camera.captureBase64();
+        
+        if (base64Image != "") {
+            if (net.isConnected()) {
+                bool success = net.uploadPhoto(cameraRequestId, base64Image);
+                if (success) {
+                    Serial.println("[CAMERA] Real photo uploaded to backend.");
+                } else {
+                    Serial.println("[CAMERA] Upload failed.");
+                }
+            }
+        } else {
+            Serial.println("[CAMERA] Failed to capture image.");
+        }
+    }
+    
     if (hasNewMqttRequest) {
         hasNewMqttRequest = false;
         Serial.println("[ACTION] New Request: " + mqttRequestMessage);
@@ -118,10 +150,8 @@ void loop() {
         }
     }
     
-    // Keep MQTT alive
     net.loopMQTT();
 
-    // 2. RFID Scan
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
         Serial.println("[SCAN] Card: " + uid);
@@ -140,7 +170,6 @@ void loop() {
         }
     }
     
-    // 3. Emergency Button
     if (inputs.isEmergencyPressed()) {
         Serial.println("[EMERGENCY] Button pressed!");
         inputs.buzz(1000); 
@@ -154,7 +183,6 @@ void loop() {
         delay(1000); 
     }
     
-    // 4. GPS Update Logic (Every 5 seconds)
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000) {
         lastGps = millis();
@@ -178,7 +206,6 @@ void loop() {
         }
     }
     
-    // 5. Heartbeat
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();

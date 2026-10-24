@@ -33,20 +33,19 @@ bool NetworkManager::isConnected() { return WiFi.status() == WL_CONNECTED; }
 String NetworkManager::getStatus() { return isConnected() ? "Online" : "Offline"; }
 
 void NetworkManager::connectMQTT() {
-    espClient.setInsecure(); // Required for TLS without a certificate
-    mqttClient.setServer(mqttServer, 8883); // Use port 8883 for TLS
+    espClient.setInsecure(); 
+    mqttClient.setServer(mqttServer, 8883); 
     
     String clientId = "BusESP32-";
     clientId += String(random(0xffff), HEX);
     
     Serial.println("[MQTT] Attempting connection...");
     
-    // Connect using the EMQX credentials
     if (mqttClient.connect(clientId.c_str(), "SMART-BUS", "uftbsmartbus@")) {
         Serial.println("[MQTT] Connected to EMQX Cloud!");
-        String topic = "smartbus/BUS-01/request";
-        mqttClient.subscribe(topic.c_str());
-        Serial.println("[MQTT] Subscribed to " + topic);
+        mqttClient.subscribe("smartbus/BUS-01/request");
+        mqttClient.subscribe("smartbus/BUS-01/camera"); // <-- Subscribe to camera topic
+        Serial.println("[MQTT] Subscribed to request and camera topics");
     } else {
         Serial.print("[MQTT] Failed, rc=");
         Serial.println(mqttClient.state());
@@ -73,8 +72,19 @@ void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
         for (unsigned int i = 0; i < length; i++) {
             message += (char)payload[i];
         }
-        if (onMessage) onMessage(message);
+        String t = String(topic);
+        
+        // Route the message based on the topic
+        if (t.indexOf("request") > 0 && onMessage) {
+            onMessage(message);
+        } else if (t.indexOf("camera") > 0 && onCamera) {
+            onCamera(message);
+        }
     });
+}
+
+void NetworkManager::setCameraCallback(std::function<void(String)> callback) {
+    onCamera = callback;
 }
 
 bool NetworkManager::postAttendance(String uid, String type, String busId) {
@@ -111,4 +121,20 @@ bool NetworkManager::postEmergency(String busId, double lat, double lng) {
     int httpResponseCode = http.POST(payload);
     http.end();
     return (httpResponseCode == 201);
+}
+
+bool NetworkManager::uploadPhoto(String requestId, String base64Image) {
+    if (!isConnected()) return false;
+    HTTPClient http;
+    String url = String(backendUrl) + "/api/trips/photo/upload";
+    http.begin(url);
+    
+    // ADD THIS LINE: Give it 20 seconds to upload the large image
+    http.setTimeout(20000); 
+    
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"requestId\":\"" + requestId + "\",\"imageBase64\":\"" + base64Image + "\"}";
+    int httpResponseCode = http.POST(payload);
+    http.end();
+    return (httpResponseCode == 200);
 }

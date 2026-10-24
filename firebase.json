@@ -5,6 +5,9 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
+  "storage": {
+    "rules": "storage.rules"
+  },
   "emulators": {
     "auth": {
       "port": 9099
@@ -13,8 +16,11 @@
       "port": 8080
     },
     "ui": {
-      "enabled": true
+      "enabled": true,
+      "port": 4000
     },
-    "singleProjectMode": true
+    "storage": {
+      "port": 9199
+    }
   }
 }

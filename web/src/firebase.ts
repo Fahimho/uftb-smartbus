@@ -4,6 +4,7 @@ import { getAuth, connectAuthEmulator } from "firebase/auth";
 const firebaseConfig = {
   projectId: "uftb-smartbus-dev",
   apiKey: "fake-api-key", 
+  storageBucket: "uftb-smartbus-dev.appspot.com" // <-- Add this line
 };
 
 const app = initializeApp(firebaseConfig);

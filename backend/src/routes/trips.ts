@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { getFirestore } from "firebase-admin/firestore";
 import "../firebase.ts";
 import { mqttClient } from "../index.ts";
+import { getStorage } from "firebase-admin/storage";
 
 const router = Router();
 const db = getFirestore();
@@ -188,6 +189,59 @@ router.get("/request/:busId", async (req: Request, res: Response) => {
 
     res.json({ hasRequest: true, message: requestData.message });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 10. Admin Requests Photo
+router.post("/photo/request", async (req: Request, res: Response) => {
+  try {
+    const { busId } = req.body;
+    
+    // Create a request record
+    const requestData = {
+      busId,
+      status: "PENDING",
+      timestamp: new Date().toISOString()
+    };
+    const docRef = await db.collection("capturePhotoRequests").add(requestData);
+
+    // Publish to MQTT to wake up the ESP32 camera
+    const topic = `smartbus/${busId}/camera`;
+    mqttClient.publish(topic, JSON.stringify({ requestId: docRef.id, action: "CAPTURE" }));
+
+    res.status(201).json({ message: "Camera trigger sent", requestId: docRef.id });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 11. ESP32 Uploads Photo
+router.post("/photo/upload", async (req: Request, res: Response) => {
+  try {
+    const { requestId, imageBase64 } = req.body;
+    
+    // Convert base64 to buffer
+    const base64Data = imageBase64.replace(/^data:image\/jpeg;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
+    
+    // Upload to Firebase Storage Emulator
+    const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
+    const file = bucket.file(`photos/${requestId}.jpg`);
+    
+    await file.save(buffer, {
+      metadata: { contentType: "image/jpeg" }
+    });
+
+    // Update Firestore record
+    await db.collection("capturePhotoRequests").doc(requestId).update({
+      status: "STORED",
+      uploadedAt: new Date().toISOString()
+    });
+
+    res.status(200).json({ message: "Photo saved to storage" });
+  } catch (error: any) {
+    console.error("Photo upload error:", error);
     res.status(500).json({ error: error.message });
   }
 });
