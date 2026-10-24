@@ -10,29 +10,32 @@
 #include "NetworkManager.h"
 #include "GPSManager.h"
 
-// --- PIN DEFINITIONS (From HARDWARE_PIN_VALIDATION.md) ---
+// --- PIN DEFINITIONS ---
 #define I2C_SDA 5
 #define I2C_SCL 6
 #define SD_CS 21
-#define GPS_RX 44  // XIAO D7 / GPIO44 acts as RX for the GPS TX wire
+#define GPS_RX 44
 
 // --- WIFI & BACKEND CONFIGURATION ---
 // CHANGE THESE TO MATCH YOUR SETUP!
-const char* WIFI_SSID = "YOUR_WIFI_NAME";       
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   
-const char* BACKEND_URL = "http://192.168.1.100:5000"; // YOUR PC IP
+const char* WIFI_SSID = "Fahim Jisan";       
+const char* WIFI_PASS = "fj@174712";  
+const char* BACKEND_URL = "http://192.168.1.100:5000"; 
+const char* MQTT_SERVER = "nf9aa1f2.ala.asia-southeast1.emqxsl.com"; 
 const String BUS_ID = "BUS-01";
 
 // --- HARDWARE OBJECTS ---
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 ResourceManager resMgr;
-RFIDManager rfid(UINT8_MAX, resMgr); // RFID CS is on MCP23008 GP5
+RFIDManager rfid(UINT8_MAX, resMgr);
 SDManager sd(SD_CS, resMgr);
-InputManager inputs(I2C_SDA, I2C_SCL); // Uses MCP23008 GP0-GP3 if connected
-NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL);
-GPSManager gps(GPS_RX, -1); // Pass -1 for TX because we only receive data from the GPS
+InputManager inputs(I2C_SDA, I2C_SCL);
+NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL, MQTT_SERVER);
+GPSManager gps(GPS_RX, -1);
 
 bool oledOk = false;
+volatile bool hasNewMqttRequest = false;
+String mqttRequestMessage = "";
 
 bool checkI2CDevice(byte address) {
     Wire.beginTransmission(address);
@@ -49,13 +52,9 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(100000); 
     
-    // 1. Resource Manager (Handles MCP23008 GP5 for RFID CS)
     resMgr.begin();
-
-    // 2. Input Manager (Handles MCP23008 GP0-GP4 for buttons/buzzer)
     inputs.begin();
 
-    // 3. OLED
     uint8_t oledAddr = 0;
     if (checkI2CDevice(0x3C)) oledAddr = 0x3C;
     else if (checkI2CDevice(0x3D)) oledAddr = 0x3D;
@@ -72,28 +71,57 @@ void setup() {
         Serial.println("[OK] OLED Display found.");
     }
 
-    // 4. SPI for SD card (RFID CS is handled by MCP23008, so SD is the native SPI device)
     SPI.begin(7, 8, 9, SD_CS);
     
-    // 5. RFID
     if (rfid.begin()) Serial.println("[OK] MFRC522 RFID found.");
     else Serial.println("[ERROR] MFRC522 RFID NOT found.");
 
-    // 6. SD Card
     if (sd.begin()) Serial.println("[OK] microSD Card found.");
     else Serial.println("[ERROR] microSD Card NOT found.");
 
-    // 7. WiFi
     net.begin();
     
-    // 8. GPS (Uses GPIO44 / D7 for RX)
+    net.setMessageCallback([](String payload) {
+        Serial.println("[MQTT RECEIVED] " + payload);
+        int start = payload.indexOf(":") + 2;
+        int end = payload.indexOf("\"", start);
+        mqttRequestMessage = payload.substring(start, end);
+        hasNewMqttRequest = true;
+    });
+    
     gps.begin();
     
     Serial.println("========================================\n");
 }
 
 void loop() {
-    // 1. RFID Scan
+    // 1. Handle MQTT Requests safely
+    if (hasNewMqttRequest) {
+        hasNewMqttRequest = false;
+        Serial.println("[ACTION] New Request: " + mqttRequestMessage);
+        
+        inputs.buzz(100); delay(100);
+        inputs.buzz(100); delay(100);
+        inputs.buzz(100);
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("NEW REQUEST:");
+            display.println(mqttRequestMessage);
+            display.display();
+            delay(3000);
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("BUS-01 ONLINE");
+            display.display();
+        }
+    }
+    
+    // Keep MQTT alive
+    net.loopMQTT();
+
+    // 2. RFID Scan
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
         Serial.println("[SCAN] Card: " + uid);
@@ -112,7 +140,7 @@ void loop() {
         }
     }
     
-    // 2. Emergency Button
+    // 3. Emergency Button
     if (inputs.isEmergencyPressed()) {
         Serial.println("[EMERGENCY] Button pressed!");
         inputs.buzz(1000); 
@@ -126,7 +154,7 @@ void loop() {
         delay(1000); 
     }
     
-    // 3. GPS Update Logic (Every 5 seconds)
+    // 4. GPS Update Logic (Every 5 seconds)
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000) {
         lastGps = millis();
@@ -144,46 +172,17 @@ void loop() {
                 net.postGPS(BUS_ID, lat, lng, speed, status);
             }
         } else {
-            // Print satellite status every 15 seconds if no fix
             if (millis() % 15000 < 5000) {
                 Serial.printf("[GPS] Searching... Satellites: %d\n", gps.getSatellites());
             }
         }
     }
     
-    // 4. Heartbeat
+    // 5. Heartbeat
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
         Serial.printf("[Status] WiFi: %s | OLED: %d\n", net.getStatus().c_str(), oledOk);
-    }
-
-        // 5. Poll for Student Requests (Every 5 seconds)
-    static unsigned long lastPoll = 0;
-    if (millis() - lastPoll > 5000) {
-        lastPoll = millis();
-        if (net.isConnected()) {
-            String req = net.getPendingRequest(BUS_ID);
-            if (req != "") {
-                Serial.println("[REQUEST] " + req);
-                
-                // Beep 3 times (like AUD-003)
-                inputs.buzz(100);
-                delay(100);
-                inputs.buzz(100);
-                delay(100);
-                inputs.buzz(100);
-
-                if (oledOk) {
-                    display.clearDisplay();
-                    display.setCursor(0, 0);
-                    display.println("NEW REQUEST:");
-                    display.println(req);
-                    display.display();
-                    delay(3000); // Show for 3 seconds
-                }
-            }
-        }
     }
     
     delay(50);

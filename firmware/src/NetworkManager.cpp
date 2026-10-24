@@ -1,9 +1,11 @@
 #include "NetworkManager.h"
 
-NetworkManager::NetworkManager(const char* ssid, const char* password, const char* backendUrl) {
+NetworkManager::NetworkManager(const char* ssid, const char* password, const char* backendUrl, const char* mqttServer)
+    : mqttClient(espClient) {
     this->ssid = ssid;
     this->password = password;
     this->backendUrl = backendUrl;
+    this->mqttServer = mqttServer;
 }
 
 void NetworkManager::begin() {
@@ -30,16 +32,58 @@ void NetworkManager::begin() {
 bool NetworkManager::isConnected() { return WiFi.status() == WL_CONNECTED; }
 String NetworkManager::getStatus() { return isConnected() ? "Online" : "Offline"; }
 
+void NetworkManager::connectMQTT() {
+    espClient.setInsecure(); // Required for TLS without a certificate
+    mqttClient.setServer(mqttServer, 8883); // Use port 8883 for TLS
+    
+    String clientId = "BusESP32-";
+    clientId += String(random(0xffff), HEX);
+    
+    Serial.println("[MQTT] Attempting connection...");
+    
+    // Connect using the EMQX credentials
+    if (mqttClient.connect(clientId.c_str(), "SMART-BUS", "uftbsmartbus@")) {
+        Serial.println("[MQTT] Connected to EMQX Cloud!");
+        String topic = "smartbus/BUS-01/request";
+        mqttClient.subscribe(topic.c_str());
+        Serial.println("[MQTT] Subscribed to " + topic);
+    } else {
+        Serial.print("[MQTT] Failed, rc=");
+        Serial.println(mqttClient.state());
+    }
+}
+
+void NetworkManager::loopMQTT() {
+    if (!mqttClient.connected()) {
+        static unsigned long lastReconnect = 0;
+        if (millis() - lastReconnect > 5000) {
+            lastReconnect = millis();
+            connectMQTT();
+        }
+    } else {
+        mqttClient.loop();
+    }
+}
+
+void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
+    onMessage = callback;
+    
+    mqttClient.setCallback([this](char* topic, byte* payload, unsigned int length) {
+        String message = "";
+        for (unsigned int i = 0; i < length; i++) {
+            message += (char)payload[i];
+        }
+        if (onMessage) onMessage(message);
+    });
+}
+
 bool NetworkManager::postAttendance(String uid, String type, String busId) {
     if (!isConnected()) return false;
-
     HTTPClient http;
     String url = String(backendUrl) + "/api/trips/attendance";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
-
     String payload = "{\"uid\":\"" + uid + "\",\"type\":\"" + type + "\",\"busId\":\"" + busId + "\"}";
-    
     int httpResponseCode = http.POST(payload);
     http.end();
     return (httpResponseCode == 201);
@@ -47,40 +91,24 @@ bool NetworkManager::postAttendance(String uid, String type, String busId) {
 
 bool NetworkManager::postGPS(String busId, double lat, double lng, double speed, String status) {
     if (!isConnected()) return false;
-
     HTTPClient http;
     String url = String(backendUrl) + "/api/trips/gps";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
-
-    String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + 
-                     ",\"lng\":" + String(lng, 6) + ",\"speed\":" + String(speed, 1) + 
-                     ",\"status\":\"" + status + "\"}";
-    
+    String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + ",\"speed\":" + String(speed, 1) + ",\"status\":\"" + status + "\"}";
     int httpResponseCode = http.POST(payload);
     http.end();
     return (httpResponseCode == 200);
 }
 
-String NetworkManager::getPendingRequest(String busId) {
-    if (!isConnected()) return "";
-    
+bool NetworkManager::postEmergency(String busId, double lat, double lng) {
+    if (!isConnected()) return false;
     HTTPClient http;
-    String url = String(backendUrl) + "/api/trips/request/" + busId;
+    String url = String(backendUrl) + "/api/trips/emergency";
     http.begin(url);
-    
-    int httpResponseCode = http.GET();
-    String message = "";
-    
-    if (httpResponseCode == 200) {
-        String payload = http.getString();
-        // Simple parsing to extract the message
-        if (payload.indexOf("\"hasRequest\":true") >= 0) {
-            int msgStart = payload.indexOf("\"message\":\"") + 11;
-            int msgEnd = payload.indexOf("\"", msgStart);
-            message = payload.substring(msgStart, msgEnd);
-        }
-    }
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + "}";
+    int httpResponseCode = http.POST(payload);
     http.end();
-    return message;
+    return (httpResponseCode == 201);
 }

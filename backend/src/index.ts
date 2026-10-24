@@ -8,11 +8,14 @@ import mqtt from "mqtt";
 const app = express();
 const PORT = process.env.BACKEND_PORT || 5000;
 
-// Connect to local MQTT Broker
-export const mqttClient = mqtt.connect("mqtt://127.0.0.1:1883");
+// Connect to EMQX Cloud Broker
+export const mqttClient = mqtt.connect("mqtts://nf9aa1f2.ala.asia-southeast1.emqxsl.com:8883", {
+  username: "SMART-BUS",
+  password: "uftbsmartbus@"
+});
 
 mqttClient.on("connect", () => {
-  console.log("✅ [MQTT] Connected to Local Broker");
+  console.log("✅ [MQTT] Connected to EMQX Cloud Broker");
 });
 
 mqttClient.on("error", (err) => {
