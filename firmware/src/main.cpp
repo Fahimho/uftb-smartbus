@@ -157,6 +157,34 @@ void loop() {
         lastHeartbeat = millis();
         Serial.printf("[Status] WiFi: %s | OLED: %d\n", net.getStatus().c_str(), oledOk);
     }
+
+        // 5. Poll for Student Requests (Every 5 seconds)
+    static unsigned long lastPoll = 0;
+    if (millis() - lastPoll > 5000) {
+        lastPoll = millis();
+        if (net.isConnected()) {
+            String req = net.getPendingRequest(BUS_ID);
+            if (req != "") {
+                Serial.println("[REQUEST] " + req);
+                
+                // Beep 3 times (like AUD-003)
+                inputs.buzz(100);
+                delay(100);
+                inputs.buzz(100);
+                delay(100);
+                inputs.buzz(100);
+
+                if (oledOk) {
+                    display.clearDisplay();
+                    display.setCursor(0, 0);
+                    display.println("NEW REQUEST:");
+                    display.println(req);
+                    display.display();
+                    delay(3000); // Show for 3 seconds
+                }
+            }
+        }
+    }
     
     delay(50);
 }

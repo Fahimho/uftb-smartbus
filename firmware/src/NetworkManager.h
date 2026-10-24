@@ -12,7 +12,7 @@ public:
     
     bool postAttendance(String uid, String type, String busId);
     bool postGPS(String busId, double lat, double lng, double speed, String status);
-
+        String getPendingRequest(String busId);
 private:
     const char* ssid;
     const char* password;

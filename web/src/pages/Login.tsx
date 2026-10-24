@@ -2,21 +2,21 @@ import { useState, useEffect } from "react";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../firebase";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../context/AuthContext"; // Import Auth Context
+import { useAuth } from "../context/AuthContext";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false); // <-- Eye icon state
   const [error, setError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   
   const navigate = useNavigate();
-  const { user, loading } = useAuth(); // Get the user state from context
+  const { user, loading } = useAuth();
 
-  // This useEffect watches for successful login and redirects properly
   useEffect(() => {
     if (user && !loading) {
-      navigate("/"); // RoleRedirect in App.tsx will handle the rest
+      navigate("/"); 
     }
   }, [user, loading, navigate]);
 
@@ -27,8 +27,6 @@ export default function Login() {
     
     try {
       await signInWithEmailAndPassword(auth, email, password);
-      // We don't navigate here! The useEffect above will handle it 
-      // once the AuthContext finishes fetching the profile.
     } catch (err: any) {
       setError(err.message);
       setIsLoggingIn(false);
@@ -46,10 +44,35 @@ export default function Login() {
             type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required 
             style={{ padding: 12, borderRadius: 6, border: "1px solid #ccc" }} 
           />
-          <input 
-            type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required 
-            style={{ padding: 12, borderRadius: 6, border: "1px solid #ccc" }} 
-          />
+          
+          {/* Password field with Eye Icon */}
+          <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+            <input 
+              type={showPassword ? "text" : "password"} 
+              value={password} 
+              onChange={e => setPassword(e.target.value)} 
+              placeholder="Password"
+              required
+              style={{ padding: 12, width: "100%", boxSizing: "border-box", paddingRight: 40, borderRadius: 6, border: "1px solid #ccc" }}
+            />
+            <div 
+              onClick={() => setShowPassword(!showPassword)}
+              style={{ position: "absolute", right: 12, cursor: "pointer", display: "flex", alignItems: "center", color: "#666" }}
+            >
+              {showPassword ? (
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                  <line x1="1" y1="1" x2="23" y2="23"></line>
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              )}
+            </div>
+          </div>
+
           <button 
             type="submit" 
             disabled={isLoggingIn}

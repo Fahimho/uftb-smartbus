@@ -61,3 +61,26 @@ bool NetworkManager::postGPS(String busId, double lat, double lng, double speed,
     http.end();
     return (httpResponseCode == 200);
 }
+
+String NetworkManager::getPendingRequest(String busId) {
+    if (!isConnected()) return "";
+    
+    HTTPClient http;
+    String url = String(backendUrl) + "/api/trips/request/" + busId;
+    http.begin(url);
+    
+    int httpResponseCode = http.GET();
+    String message = "";
+    
+    if (httpResponseCode == 200) {
+        String payload = http.getString();
+        // Simple parsing to extract the message
+        if (payload.indexOf("\"hasRequest\":true") >= 0) {
+            int msgStart = payload.indexOf("\"message\":\"") + 11;
+            int msgEnd = payload.indexOf("\"", msgStart);
+            message = payload.substring(msgStart, msgEnd);
+        }
+    }
+    http.end();
+    return message;
+}
