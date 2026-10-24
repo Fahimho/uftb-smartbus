@@ -1,8 +1,9 @@
-import { requireAuth, AuthRequest } from "../middleware/auth.ts"; // Use .ts
+import { requireAuth, AuthRequest } from "../middleware/auth.ts"; 
 import { Router, Request, Response } from "express";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
-import "../firebase.ts"; // Use .ts
+import "../firebase.ts"; 
+
 const router = Router();
 const adminAuth = getAuth();
 const db = getFirestore();
@@ -15,7 +16,8 @@ router.get("/test", (req: Request, res: Response) => {
 // Registration Route
 router.post("/register", async (req: Request, res: Response) => {
   try {
-    const { email, password, displayName } = req.body;
+    // 1. Extract 'role' from the request body
+    const { email, password, displayName, role } = req.body;
 
     if (!email || !password) {
        res.status(400).json({ error: "Email and password are required." });
@@ -28,17 +30,21 @@ router.post("/register", async (req: Request, res: Response) => {
       displayName: displayName || "New User",
     });
 
+    // 2. Default to "student" if no role is provided
+    const assignedRole = role || "student";
+
     await db.collection("users").doc(userRecord.uid).set({
       uid: userRecord.uid,
       email: email,
       displayName: displayName || "New User",
-      role: "student", 
+      role: assignedRole, // 3. Apply the role here
       createdAt: new Date().toISOString(),
     });
 
     res.status(201).json({
       message: "User registered successfully",
       uid: userRecord.uid,
+      role: assignedRole
     });
 
   } catch (error: any) {
@@ -50,10 +56,7 @@ router.post("/register", async (req: Request, res: Response) => {
 // Get current user profile
 router.get("/me", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    // req.user contains the decoded Firebase token (uid, email, etc.)
     const uid = req.user.uid;
-
-    // Fetch their profile from Firestore
     const userDoc = await db.collection("users").doc(uid).get();
     
     if (!userDoc.exists) {

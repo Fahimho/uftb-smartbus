@@ -5,13 +5,15 @@
 
 class RFIDManager {
 public:
-    RFIDManager(uint8_t csPin, uint8_t rstPin, ResourceManager& rm);
+    RFIDManager(uint8_t rstPin, ResourceManager& rm);
     bool begin();
-    void scan();
+    bool scan();
     bool isConnected() const { return connected; }
+    String getLastUID() const { return lastUID; }
 
 private:
     MFRC522 mfrc522;
     ResourceManager& resourceManager;
     bool connected;
+    String lastUID;
 };
