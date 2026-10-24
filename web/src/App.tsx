@@ -4,6 +4,8 @@ import Login from "./pages/Login";
 import AdminDashboard from "./pages/AdminDashboard";
 import OperatorDashboard from "./pages/OperatorDashboard";
 import GuestDashboard from "./pages/GuestDashboard";
+import StudentDashboard from "./pages/StudentDashboard";
+
 
 // Protected Route Component
 function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode, allowedRoles: string[] }) {
@@ -36,6 +38,11 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/student" element={
+            <ProtectedRoute allowedRoles={["student"]}>
+              <StudentDashboard />
+               </ProtectedRoute>
+          } />
           <Route path="/login" element={<Login />} />
           
           <Route path="/" element={<RoleRedirect />} />

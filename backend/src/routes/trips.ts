@@ -37,5 +37,34 @@ router.post("/attendance", async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 });
+// Endpoint for ESP32 to update GPS location
+router.post("/gps", async (req: Request, res: Response) => {
+  try {
+    const { busId, lat, lng, speed, status } = req.body;
+
+    if (!busId || lat === undefined || lng === undefined) {
+       res.status(400).json({ error: "Missing busId, lat, or lng" });
+       return;
+    }
+
+    // We store the latest GPS location in a 'buses' collection.
+    // Using set(..., {merge: true}) ensures we update the bus record.
+    await db.collection("buses").doc(busId).set({
+      busId: busId,
+      lastLocation: {
+        lat: Number(lat),
+        lng: Number(lng),
+        speed: Number(speed || 0),
+        status: status || "Moving",
+        updatedAt: new Date().toISOString()
+      }
+    }, { merge: true });
+
+    res.status(200).json({ message: "GPS location updated" });
+  } catch (error: any) {
+    console.error("GPS error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 export default router;

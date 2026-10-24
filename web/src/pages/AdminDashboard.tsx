@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import Layout from "../components/Layout";
 import { getFirestore, collection, onSnapshot } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
+import LiveMap from "../components/LiveMap";
 
 const db = getFirestore();
 connectFirestoreEmulator(db, "127.0.0.1", 8080);
@@ -76,7 +77,16 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {activeTab !== "dashboard" && (
+      {/* LIVE MAP TAB */}
+      {activeTab === "map" && (
+        <div>
+          <h3 style={{ marginTop: 0 }}>Live Fleet Map</h3>
+          <LiveMap />
+        </div>
+      )}
+
+      {/* OTHER TABS PLACEHOLDER */}
+      {activeTab !== "dashboard" && activeTab !== "map" && (
         <div style={{ background: "white", padding: 48, borderRadius: 12, textAlign: "center", color: "#64748b" }}>
           <h2>Feature in development</h2>
           <p>We will build this in the next steps.</p>
