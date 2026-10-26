@@ -185,7 +185,7 @@ export default function OperatorDashboard() {
             )}
           </div>
           <h3>Live Map</h3>
-          <LiveMap />
+          <LiveMap userRole="operator" />
         </div>
       )}
 
@@ -308,7 +308,7 @@ export default function OperatorDashboard() {
       {activeTab === "map" && (
         <div>
           <h3 style={{ marginTop: 0 }}>Live Bus Location</h3>
-          <LiveMap />
+          <LiveMap userRole="operator" />
         </div>
       )}
     </Layout>

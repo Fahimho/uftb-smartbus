@@ -36,9 +36,8 @@ export default function StudentDashboard() {
     return () => clearInterval(interval);
   }, [busData]);
 
-  // 3. SEND REQUEST (With Student Name & Toast Notifications)
-  const sendRequest = async (locationText: string) => {
-    const message = `ami ${locationText} te achi`;
+  // 3. SEND REQUEST (Includes optional lat/lng)
+  const sendRequest = async (message: string, lat?: number, lng?: number) => {
     const loadingToast = toast.loading("Sending request to bus...");
     
     try {
@@ -48,12 +47,14 @@ export default function StudentDashboard() {
         body: JSON.stringify({ 
           busId: "BUS-01", 
           message: message,
-          studentName: user?.displayName || "Student"
+          studentName: user?.displayName || "Student",
+          lat: lat,
+          lng: lng
         })
       });
       
       if (res.ok) {
-        toast.success(`Request sent: "${message}"`, { id: loadingToast });
+        toast.success(`Sent: "${message}"`, { id: loadingToast });
       } else {
         toast.error("Failed to send request.", { id: loadingToast });
       }
@@ -62,16 +63,30 @@ export default function StudentDashboard() {
     }
   };
 
-  // 4. BROWSER GPS LOCATION
+  // 4. BROWSER GPS LOCATION (With Reverse Geocoding)
   const getLocation = () => {
     if (navigator.geolocation) {
-      const loadingToast = toast.loading("Getting your GPS location...");
+      const loadingToast = toast.loading("Getting your location...");
       navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const lat = position.coords.latitude.toFixed(4);
-          const lng = position.coords.longitude.toFixed(4);
-          toast.dismiss(loadingToast);
-          sendRequest(`GPS (${lat}, ${lng})`);
+        async (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          
+          try {
+            // Reverse Geocode using OpenStreetMap (Nominatim)
+            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+            const data = await res.json();
+            
+            let placeName = data.address.suburb || data.address.village || data.address.town || data.address.city || "Unknown";
+            if (placeName.length > 20) placeName = placeName.substring(0, 20);
+
+            toast.dismiss(loadingToast);
+            sendRequest(`ami ${placeName} achi`, lat, lng);
+          } catch (error) {
+            toast.dismiss(loadingToast);
+            // Fallback if geocoding fails
+            sendRequest(`ami location (${lat.toFixed(4)}, ${lng.toFixed(4)}) achi`, lat, lng);
+          }
         },
         () => {
           toast.error("GPS failed. Please type your location manually.", { id: loadingToast });
@@ -85,7 +100,7 @@ export default function StudentDashboard() {
       toast.error("Please enter a location first.");
       return;
     }
-    sendRequest(locationName);
+    sendRequest(`ami ${locationName} achi`);
     setLocationName("");
   };
 
@@ -147,7 +162,7 @@ export default function StudentDashboard() {
 
           {/* LIVE MAP SECTION */}
           <h3>Live Location</h3>
-          <LiveMap />
+          <LiveMap userRole="student" />
         </div>
       )}
 
@@ -157,7 +172,7 @@ export default function StudentDashboard() {
       {activeTab === "map" && (
         <div>
           <h3 style={{ marginTop: 0 }}>Live Bus Location</h3>
-          <LiveMap />
+          <LiveMap userRole="student" />
         </div>
       )}
     </Layout>

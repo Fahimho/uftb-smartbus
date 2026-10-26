@@ -89,7 +89,7 @@ router.post("/end", async (req: Request, res: Response) => {
 // 3. Record Attendance
 router.post("/attendance", async (req: Request, res: Response) => {
   try {
-    const { uid, type, busId } = req.body;
+    const { uid, type, busId, studentName } = req.body; // <-- Added studentName
 
     if (!uid || !type || !busId) {
        res.status(400).json({ error: "Missing uid, type, or busId" });
@@ -110,6 +110,7 @@ router.post("/attendance", async (req: Request, res: Response) => {
       type: type,
       busId: busId,
       tripId: tripId,
+      studentName: studentName || "Unknown", // <-- Save it
       timestamp: new Date().toISOString(),
     };
 
@@ -193,23 +194,29 @@ router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
   }
 });
 
-// 8. Student Request (Publishes to MQTT)
+// 8. Student Request (Publishes to MQTT) - NOW SAVES LAT/LNG
 router.post("/request", async (req: Request, res: Response) => {
   try {
-    const { busId, message, studentName } = req.body;
+    const { busId, message, studentName, lat, lng } = req.body;
     
     if (!message || message.length > 35) { 
        res.status(400).json({ error: "Message too long for bus display" });
        return;
     }
 
-    const requestData = { 
+    const requestData: any = { 
       busId, 
       message, 
       studentName: studentName || "Unknown Student",
       status: "PENDING", 
       timestamp: new Date().toISOString() 
     };
+
+    // If GPS coordinates were provided, save them
+    if (lat !== undefined && lng !== undefined) {
+      requestData.lat = Number(lat);
+      requestData.lng = Number(lng);
+    }
     
     await db.collection("busRequests").add(requestData);
 
