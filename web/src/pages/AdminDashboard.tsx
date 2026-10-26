@@ -9,6 +9,7 @@ import { connectStorageEmulator } from "firebase/storage";
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import toast from "react-hot-toast";
 
 // Fix Leaflet icons
 import icon from 'leaflet/dist/images/marker-icon.png';
@@ -66,12 +67,17 @@ export default function AdminDashboard() {
         reader.readAsDataURL(blob);
         reader.onloadend = async () => {
           const base64Audio = reader.result as string;
-          await fetch("http://localhost:5000/api/trips/audio/send", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ busId: "BUS-01", audioBase64: base64Audio })
-          });
-          alert("Voice message sent to bus!");
+          const loadingToast = toast.loading("Sending voice message...");
+          try {
+            await fetch("http://localhost:5000/api/trips/audio/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ busId: "BUS-01", audioBase64: base64Audio })
+            });
+            toast.success("Voice message sent to bus!", { id: loadingToast });
+          } catch (err) {
+            toast.error("Failed to send message.", { id: loadingToast });
+          }
         };
       };
 
@@ -79,7 +85,7 @@ export default function AdminDashboard() {
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
     } catch (err) {
-      alert("Microphone access denied.");
+      toast.error("Microphone access denied.");
     }
   };
 
@@ -93,6 +99,9 @@ export default function AdminDashboard() {
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
       
+      {/* ========================================== */}
+      {/* DASHBOARD TAB */}
+      {/* ========================================== */}
       {activeTab === "dashboard" && (
         <div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 24, marginBottom: 32 }}>
@@ -120,32 +129,39 @@ export default function AdminDashboard() {
             <div style={{ padding: 24, borderBottom: "1px solid #e2e8f0" }}>
               <h3 style={{ margin: 0 }}>Recent RFID Scans</h3>
             </div>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ background: "#f8fafc", textAlign: "left", fontSize: 14, color: "#64748b" }}>
-                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Time</th>
-                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>UID</th>
-                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Type</th>
-                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Bus</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map(ev => (
-                  <tr key={ev.id} style={{ borderTop: "1px solid #e2e8f0" }}>
-                    <td style={{ padding: "16px 24px", color: "#64748b" }}>{new Date(ev.timestamp).toLocaleTimeString()}</td>
-                    <td style={{ padding: "16px 24px", fontWeight: "bold" }}>{ev.uid}</td>
-                    <td style={{ padding: "16px 24px" }}>
-                      <span style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>{ev.type}</span>
-                    </td>
-                    <td style={{ padding: "16px 24px" }}>{ev.busId}</td>
+            {events.length === 0 ? (
+              <p style={{ padding: 24, textAlign: "center", color: "#64748b" }}>No scans yet.</p>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc", textAlign: "left", fontSize: 14, color: "#64748b" }}>
+                    <th style={{ padding: "16px 24px", fontWeight: 600 }}>Time</th>
+                    <th style={{ padding: "16px 24px", fontWeight: 600 }}>UID</th>
+                    <th style={{ padding: "16px 24px", fontWeight: 600 }}>Type</th>
+                    <th style={{ padding: "16px 24px", fontWeight: 600 }}>Bus</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {events.map(ev => (
+                    <tr key={ev.id} style={{ borderTop: "1px solid #e2e8f0" }}>
+                      <td style={{ padding: "16px 24px", color: "#64748b" }}>{new Date(ev.timestamp).toLocaleTimeString()}</td>
+                      <td style={{ padding: "16px 24px", fontWeight: "bold" }}>{ev.uid}</td>
+                      <td style={{ padding: "16px 24px" }}>
+                        <span style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>{ev.type}</span>
+                      </td>
+                      <td style={{ padding: "16px 24px" }}>{ev.busId}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       )}
 
+      {/* ========================================== */}
+      {/* EMERGENCY TAB */}
+      {/* ========================================== */}
       {activeTab === "emergency" && (
         <div>
           <h3 style={{ marginTop: 0 }}>Active Emergencies</h3>
@@ -171,7 +187,10 @@ export default function AdminDashboard() {
                 <div style={{ display: "flex", gap: 12 }}>
                   <button 
                     onClick={async () => {
+                      toast.loading("Resolving...");
                       await fetch(`http://localhost:5000/api/trips/emergency/${em.id}/resolve`, { method: "POST" });
+                      toast.success("Emergency resolved");
+                      toast.dismiss();
                     }}
                     style={{ padding: "10px 20px", background: "#10b981", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
                   >
@@ -196,17 +215,15 @@ export default function AdminDashboard() {
                     </MapContainer>
                   </div>
                 )}
-                {openMapFor === em.id && (em.lat === 0 || em.lng === 0) && (
-                  <div style={{ marginTop: 16, padding: 16, background: "white", borderRadius: 8, color: "#ef4444" }}>
-                    No GPS coordinates available for this emergency.
-                  </div>
-                )}
               </div>
             ))
           )}
         </div>
       )}
 
+      {/* ========================================== */}
+      {/* LIVE MAP TAB */}
+      {/* ========================================== */}
       {activeTab === "map" && (
         <div>
           <h3 style={{ marginTop: 0 }}>Live Fleet Map</h3>
@@ -214,6 +231,9 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* ========================================== */}
+      {/* CAMERA TAB */}
+      {/* ========================================== */}
       {activeTab === "camera" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
           <h2 style={{ marginTop: 0 }}>Capture Photo</h2>
@@ -221,8 +241,9 @@ export default function AdminDashboard() {
           
           <button 
             onClick={async () => {
+              const loading = toast.loading("Triggering camera...");
               await fetch("http://localhost:5000/api/trips/photo/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: "BUS-01" }) });
-              alert("Capture command sent to bus!");
+              toast.success("Capture command sent!", { id: loading });
             }}
             style={{ padding: "12px 24px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
           >
@@ -235,6 +256,9 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* ========================================== */}
+      {/* AUDIO TAB */}
+      {/* ========================================== */}
       {activeTab === "audio" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
           <h2 style={{ marginTop: 0 }}>Voice Messages</h2>
@@ -254,11 +278,6 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {activeTab !== "dashboard" && activeTab !== "map" && activeTab !== "emergency" && activeTab !== "camera" && activeTab !== "audio" && (
-        <div style={{ background: "white", padding: 48, borderRadius: 12, textAlign: "center", color: "#64748b" }}>
-          <h2>Feature in development</h2>
-        </div>
-      )}
     </Layout>
   );
 }
@@ -266,6 +285,7 @@ export default function AdminDashboard() {
 function CameraViewer() {
   const [photo, setPhoto] = useState<any>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const q = query(collection(db, "capturePhotoRequests"), where("status", "==", "STORED"));
@@ -282,18 +302,31 @@ function CameraViewer() {
           console.error("Error fetching image:", err);
         }
       }
+      setLoading(false);
     });
     return () => unsub();
   }, []);
 
-  if (!photo) return <p style={{ color: "#64748b" }}>Waiting for photo...</p>;
+  if (loading) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 48 }}>
+      <div style={{ width: 40, height: 40, border: "4px solid #e2e8f0", borderTop: "4px solid #3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+      <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+      <p style={{ marginTop: 16, color: "#64748b" }}>Loading camera...</p>
+    </div>
+  );
+
+  if (!photo) return (
+    <div style={{ background: "#f8fafc", padding: 48, borderRadius: 12, border: "2px dashed #cbd5e1", textAlign: "center", color: "#64748b" }}>
+      <p>No photos captured yet. Click "Trigger Camera" to request a photo.</p>
+    </div>
+  );
 
   return (
     <div style={{ background: "#f8fafc", padding: 24, borderRadius: 12, border: "1px solid #e2e8f0" }}>
       <p style={{ margin: "0 0 8px 0" }}><strong>Status:</strong> {photo.status}</p>
       <p style={{ margin: "0 0 16px 0" }}><strong>Time:</strong> {new Date(photo.uploadedAt).toLocaleTimeString()}</p>
       {imageUrl ? (
-        <img src={imageUrl} alt="Bus Capture" style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #ccc" }} />
+        <img src={imageUrl} alt="Bus Capture" style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #ccc", boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }} />
       ) : (
         <p>Loading image...</p>
       )}

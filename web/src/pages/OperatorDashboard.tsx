@@ -5,6 +5,7 @@ import { getFirestore, collection, onSnapshot, query, where, doc, updateDoc } fr
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { useAuth } from "../context/AuthContext";
 import { Bell, X } from "lucide-react";
+import toast from "react-hot-toast";
 
 const db = getFirestore();
 connectFirestoreEmulator(db, "127.0.0.1", 8080);
@@ -22,7 +23,6 @@ export default function OperatorDashboard() {
   const [allTrips, setAllTrips] = useState<any[]>([]);
   const { user } = useAuth();
   
-  // State for viewing past trip attendance
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
   const [viewingTripEvents, setViewingTripEvents] = useState<any[]>([]);
 
@@ -91,7 +91,6 @@ export default function OperatorDashboard() {
     return () => unsubscribe();
   }, []);
 
-  // Function to view past trip attendance
   const handleViewTrip = (tripId: string) => {
     setViewingTripId(tripId);
     const q = query(collection(db, "tripAttendance"), where("tripId", "==", tripId));
@@ -101,6 +100,21 @@ export default function OperatorDashboard() {
       setViewingTripEvents(evList);
     });
     return () => unsub();
+  };
+
+  const handleToggleTrip = async () => {
+    const loadingToast = toast.loading(tripActive ? "Ending trip..." : "Starting trip...");
+    try {
+      if (tripActive) {
+        await fetch("http://localhost:5000/api/trips/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID }) });
+        toast.success("Trip Ended. GPS trail cleared.", { id: loadingToast });
+      } else {
+        await fetch("http://localhost:5000/api/trips/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID, operatorUid: user?.uid }) });
+        toast.success("Trip Started!", { id: loadingToast });
+      }
+    } catch (err) {
+      toast.error("Failed to update trip status.", { id: loadingToast });
+    }
   };
 
   return (
@@ -118,7 +132,7 @@ export default function OperatorDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* DASHBOARD TAB (Controls + Live Passenger)  */}
+      {/* DASHBOARD TAB */}
       {/* ========================================== */}
       {activeTab === "dashboard" && (
         <div>
@@ -127,14 +141,8 @@ export default function OperatorDashboard() {
             <p>Bus Assignment: <strong>{BUS_ID}</strong></p>
             
             <button 
-              onClick={async () => {
-                if (tripActive) {
-                  await fetch("http://localhost:5000/api/trips/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID }) });
-                } else {
-                  await fetch("http://localhost:5000/api/trips/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID, operatorUid: user?.uid }) });
-                }
-              }}
-              style={{ padding: "16px 32px", fontSize: 18, fontWeight: "bold", borderRadius: 8, border: "none", cursor: "pointer", background: tripActive ? "#ef4444" : "#10b981", color: "white", marginTop: 16 }}
+              onClick={handleToggleTrip}
+              style={{ padding: "16px 32px", fontSize: 18, fontWeight: "bold", borderRadius: 8, border: "none", cursor: "pointer", background: tripActive ? "#ef4444" : "#10b981", color: "white", marginTop: 16, transition: "opacity 0.2s" }}
             >
               {tripActive ? "END TRIP" : "START TRIP"}
             </button>
@@ -150,9 +158,9 @@ export default function OperatorDashboard() {
           <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)", marginBottom: 24 }}>
             <h3 style={{ marginTop: 0 }}>Live Passenger List (Current Trip)</h3>
             {!tripActive ? (
-              <p>No active trip. Start a trip to see passengers.</p>
+              <p style={{ color: "#64748b" }}>No active trip. Start a trip to see passengers.</p>
             ) : events.length === 0 ? (
-              <p>Waiting for students to scan their RFID cards...</p>
+              <p style={{ color: "#64748b" }}>Waiting for students to scan their RFID cards...</p>
             ) : (
               <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10 }}>
                 <thead>
@@ -182,7 +190,7 @@ export default function OperatorDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* TRIPS TAB (History + Detailed Attendance)  */}
+      {/* TRIPS TAB */}
       {/* ========================================== */}
       {activeTab === "trips" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
@@ -226,7 +234,6 @@ export default function OperatorDashboard() {
             </table>
           )}
 
-          {/* ATTENDANCE DETAILS FOR SELECTED TRIP */}
           {viewingTripId && (
             <div style={{ marginTop: 32, padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -265,7 +272,7 @@ export default function OperatorDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* MESSAGES TAB (Requests History)            */}
+      {/* MESSAGES TAB */}
       {/* ========================================== */}
       {activeTab === "messages" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
@@ -296,7 +303,7 @@ export default function OperatorDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* LIVE MAP TAB (Fixed)                       */}
+      {/* LIVE MAP TAB */}
       {/* ========================================== */}
       {activeTab === "map" && (
         <div>
