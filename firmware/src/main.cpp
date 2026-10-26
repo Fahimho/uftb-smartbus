@@ -9,7 +9,7 @@
 #include "InputManager.h"
 #include "NetworkManager.h"
 #include "GPSManager.h"
-#include "CameraManager.h" // <-- Import Camera Manager
+#include "CameraManager.h"
 
 // --- PIN DEFINITIONS ---
 #define I2C_SDA 5
@@ -20,7 +20,7 @@
 // --- WIFI & BACKEND CONFIGURATION ---
 const char* WIFI_SSID = "Fahim Jisan";       
 const char* WIFI_PASS = "fj@174712";  
-const char* BACKEND_URL = "http://192.168.0.102:5000"; // <-- Changed to your PC IP
+const char* BACKEND_URL = "http://192.168.0.102:5000"; 
 const char* MQTT_SERVER = "nf9aa1f2.ala.asia-southeast1.emqxsl.com"; 
 const String BUS_ID = "BUS-01";
 
@@ -32,13 +32,21 @@ SDManager sd(SD_CS, resMgr);
 InputManager inputs(I2C_SDA, I2C_SCL);
 NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL, MQTT_SERVER);
 GPSManager gps(GPS_RX, -1);
-CameraManager camera; // <-- Add Camera
+CameraManager camera;
 
 bool oledOk = false;
+
+// MQTT Request Variables
 volatile bool hasNewMqttRequest = false;
 String mqttRequestMessage = "";
+
+// Camera Request Variables
 volatile bool hasCameraRequest = false; 
 String cameraRequestId = "";
+
+// Audio Request Variables
+volatile bool hasAudioRequest = false;
+String audioRequestMessage = "";    
 
 bool checkI2CDevice(byte address) {
     Wire.beginTransmission(address);
@@ -87,6 +95,7 @@ void setup() {
 
     net.begin();
     
+    // 1. Student Request Callback
     net.setMessageCallback([](String payload) {
         Serial.println("[MQTT RECEIVED] " + payload);
         int start = payload.indexOf(":") + 2;
@@ -95,6 +104,7 @@ void setup() {
         hasNewMqttRequest = true;
     });
 
+    // 2. Camera Request Callback
     net.setCameraCallback([](String payload) {
         int start = payload.indexOf(":") + 2;
         int end = payload.indexOf("\"", start);
@@ -102,12 +112,19 @@ void setup() {
         hasCameraRequest = true;
     });
     
+    // 3. Audio Request Callback
+    net.setAudioCallback([](String payload) {
+        Serial.println("[MQTT AUDIO] " + payload);
+        hasAudioRequest = true;
+    });
+
     gps.begin();
     
     Serial.println("========================================\n");
 }
 
 void loop() {
+    // 1. Camera Request
     if (hasCameraRequest) {
         hasCameraRequest = false;
         Serial.println("[CAMERA] Capture requested! ID: " + cameraRequestId);
@@ -117,21 +134,20 @@ void loop() {
         if (base64Image != "") {
             if (net.isConnected()) {
                 bool success = net.uploadPhoto(cameraRequestId, base64Image);
-                if (success) {
-                    Serial.println("[CAMERA] Real photo uploaded to backend.");
-                } else {
-                    Serial.println("[CAMERA] Upload failed.");
-                }
+                if (success) Serial.println("[CAMERA] Real photo uploaded to backend.");
+                else Serial.println("[CAMERA] Upload failed.");
             }
         } else {
             Serial.println("[CAMERA] Failed to capture image.");
         }
     }
-    
-    if (hasNewMqttRequest) {
-        hasNewMqttRequest = false;
-        Serial.println("[ACTION] New Request: " + mqttRequestMessage);
+
+    // 2. Audio Request
+    if (hasAudioRequest) {
+        hasAudioRequest = false;
+        Serial.println("[AUDIO] New voice message received!");
         
+        // 3 beeps for audio
         inputs.buzz(100); delay(100);
         inputs.buzz(100); delay(100);
         inputs.buzz(100);
@@ -139,10 +155,46 @@ void loop() {
         if (oledOk) {
             display.clearDisplay();
             display.setCursor(0, 0);
-            display.println("NEW REQUEST:");
-            display.println(mqttRequestMessage);
+            display.println("NEW AUDIO MSG");
             display.display();
             delay(3000);
+            display.clearDisplay();
+            display.println("BUS-01 ONLINE");
+            display.display();
+        }
+    }
+
+    // 3. Student Stop Request
+    if (hasNewMqttRequest) {
+        hasNewMqttRequest = false;
+        Serial.println("[ACTION] New Request: " + mqttRequestMessage);
+        
+        // 5 Beeps: 1s ON, 1s OFF
+        for (int i = 0; i < 5; i++) {
+            inputs.buzz(1000);
+            delay(1000);
+        }
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setCursor(0, 0);
+            
+            int teIndex = mqttRequestMessage.indexOf(" te achi");
+            if (teIndex > 0) {
+                String line1 = mqttRequestMessage.substring(0, teIndex);
+                String line2 = mqttRequestMessage.substring(teIndex + 1);
+                display.println("NEW REQUEST:");
+                display.println(line1);
+                display.println(line2);
+            } else {
+                display.println("NEW REQUEST:");
+                display.println(mqttRequestMessage);
+            }
+            
+            display.display();
+            delay(5000);
+            
             display.clearDisplay();
             display.setCursor(0, 0);
             display.println("BUS-01 ONLINE");
@@ -152,6 +204,7 @@ void loop() {
     
     net.loopMQTT();
 
+    // 4. RFID Scan
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
         Serial.println("[SCAN] Card: " + uid);
@@ -170,6 +223,7 @@ void loop() {
         }
     }
     
+    // 5. Emergency Button
     if (inputs.isEmergencyPressed()) {
         Serial.println("[EMERGENCY] Button pressed!");
         inputs.buzz(1000); 
@@ -183,6 +237,7 @@ void loop() {
         delay(1000); 
     }
     
+    // 6. GPS Updates
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000) {
         lastGps = millis();
@@ -206,6 +261,7 @@ void loop() {
         }
     }
     
+    // 7. Heartbeat
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();

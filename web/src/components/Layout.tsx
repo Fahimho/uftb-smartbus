@@ -11,11 +11,10 @@ interface LayoutProps {
 export default function Layout({ children, activeTab, setActiveTab }: LayoutProps) {
   const { user, logout } = useAuth();
 
-  // Role-based menu items
   const menuItems = [
-    { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={20} />, roles: ["admin", "operator", "guest"] },
+    { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={20} />, roles: ["admin", "operator", "guest", "student"] },
     { id: "trips", label: "Trips & Attendance", icon: <Bus size={20} />, roles: ["admin", "operator"] },
-    { id: "map", label: "Live Map", icon: <Map size={20} />, roles: ["admin", "operator", "guest"] },
+    { id: "map", label: "Live Map", icon: <Map size={20} />, roles: ["admin", "operator", "guest", "student"] }, // <-- Added student
     { id: "emergency", label: "Emergency", icon: <AlertTriangle size={20} />, roles: ["admin"] },
     { id: "camera", label: "Capture Photo", icon: <Camera size={20} />, roles: ["admin"] },
     { id: "audio", label: "Voice Messages", icon: <Mic size={20} />, roles: ["admin"] },
@@ -59,11 +58,13 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
           <h2 style={{ margin: 0, textTransform: "capitalize" }}>{activeTab.replace("-", " ")}</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{user?.displayName}</div>
-              <div style={{ fontSize: 12, color: "#64748b", textTransform: "uppercase" }}>{user?.role}</div>
+              {/* FIXED: Added optional chaining and fallback */}
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{user?.displayName || "User"}</div>
+              <div style={{ fontSize: 12, color: "#64748b", textTransform: "uppercase" }}>{user?.role || "Unknown"}</div>
             </div>
             <div style={{ width: 40, height: 40, borderRadius: "50%", background: "#3b82f6", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold" }}>
-              {user?.displayName.charAt(0)}
+              {/* FIXED: Added optional chaining and fallback */}
+              {user?.displayName?.charAt(0) || "U"}
             </div>
           </div>
         </div>

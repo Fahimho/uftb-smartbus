@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { AlertTriangle, Map as MapIcon, X, Camera } from "lucide-react";
+import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square } from "lucide-react";
 import { getFirestore, collection, onSnapshot, query, where } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
@@ -27,6 +27,11 @@ export default function AdminDashboard() {
   const [events, setEvents] = useState<any[]>([]);
   const [emergencies, setEmergencies] = useState<any[]>([]);
   const [openMapFor, setOpenMapFor] = useState<string | null>(null);
+  
+  // Audio recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "tripAttendance"), (snapshot) => {
@@ -46,6 +51,44 @@ export default function AdminDashboard() {
     });
     return () => unsub();
   }, []);
+
+  // Audio recording functions
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+      recorder.onstop = async () => {
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = async () => {
+          const base64Audio = reader.result as string;
+          await fetch("http://localhost:5000/api/trips/audio/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ busId: "BUS-01", audioBase64: base64Audio })
+          });
+          alert("Voice message sent to bus!");
+        };
+      };
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (err) {
+      alert("Microphone access denied.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -192,7 +235,26 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {activeTab !== "dashboard" && activeTab !== "map" && activeTab !== "emergency" && activeTab !== "camera" && (
+      {activeTab === "audio" && (
+        <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
+          <h2 style={{ marginTop: 0 }}>Voice Messages</h2>
+          <p>Record a message to broadcast to the bus. The bus will beep 3 times.</p>
+          
+          <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
+            {!isRecording ? (
+              <button onClick={startRecording} style={{ padding: "12px 24px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}>
+                <Mic size={18} /> Start Recording
+              </button>
+            ) : (
+              <button onClick={stopRecording} style={{ padding: "12px 24px", background: "#10b981", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}>
+                <Square size={18} /> Stop & Send
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab !== "dashboard" && activeTab !== "map" && activeTab !== "emergency" && activeTab !== "camera" && activeTab !== "audio" && (
         <div style={{ background: "white", padding: 48, borderRadius: 12, textAlign: "center", color: "#64748b" }}>
           <h2>Feature in development</h2>
         </div>

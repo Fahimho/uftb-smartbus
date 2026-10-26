@@ -1,65 +1,129 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { Bell, MapPin } from "lucide-react";
+import { MapPin, Navigation } from "lucide-react";
+import { getFirestore, doc, onSnapshot } from "firebase/firestore";
+import { connectFirestoreEmulator } from "firebase/firestore";
 import { useAuth } from "../context/AuthContext";
+
+const db = getFirestore();
+connectFirestoreEmulator(db, "127.0.0.1", 8080);
 
 export default function StudentDashboard() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [requestStatus, setRequestStatus] = useState("");
+  const [busData, setBusData] = useState<any>(null);
+  const [locationName, setLocationName] = useState("");
   const { user } = useAuth();
 
-  const handleRequest = async () => {
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "buses", "BUS-01"), (docSnap) => {
+      if (docSnap.exists()) setBusData(docSnap.data().lastLocation);
+    });
+    return () => unsub();
+  }, []);
+
+  const sendRequest = async (locationText: string) => {
     setRequestStatus("Sending...");
     try {
+      const message = `ami ${locationText} te achi`;
       const res = await fetch("http://localhost:5000/api/trips/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ busId: "BUS-01", message: "STOP AT NEXT STATION" })
+        body: JSON.stringify({ busId: "BUS-01", message: message })
       });
       
       if (res.ok) {
-        setRequestStatus("✅ Request sent to driver!");
-        setTimeout(() => setRequestStatus(""), 3000);
+        setRequestStatus(`✅ Sent: "${message}"`);
+        setTimeout(() => setRequestStatus(""), 4000);
       }
     } catch (err) {
       setRequestStatus("❌ Failed to send request");
     }
   };
 
+  const getLocation = () => {
+    if (navigator.geolocation) {
+      setRequestStatus("Getting GPS...");
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const lat = position.coords.latitude.toFixed(4);
+          const lng = position.coords.longitude.toFixed(4);
+          sendRequest(`GPS (${lat}, ${lng})`);
+        },
+        () => {
+          setRequestStatus("❌ GPS failed. Please enter manually.");
+        }
+      );
+    }
+  };
+
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
+      
       {activeTab === "dashboard" && (
         <div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 24 }}>
             
+            {/* BUS STATUS */}
             <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
               <h3 style={{ marginTop: 0 }}>My Bus Status</h3>
               <p>Bus: <strong>BUS-01</strong></p>
-              <p>Status: <span style={{ color: "#10b981", fontWeight: "bold" }}>Moving</span></p>
-              <p>ETA: 12 minutes</p>
+              <p>
+                Status: {busData ? (
+                  <span style={{ color: busData.speed > 2 ? "#10b981" : "#f59e0b", fontWeight: "bold" }}>{busData.status}</span>
+                ) : (
+                  <span style={{ color: "#ef4444", fontWeight: "bold" }}>Offline</span>
+                )}
+              </p>
+              <p>Last Update: {busData ? new Date(busData.updatedAt).toLocaleTimeString() : "No data"}</p>
             </div>
 
+            {/* QUICK ACTIONS */}
             <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
-              <h3 style={{ marginTop: 0 }}>Quick Actions</h3>
+              <h3 style={{ marginTop: 0 }}>Request Bus Stop</h3>
               {requestStatus && <p style={{ color: "green", fontWeight: "bold" }}>{requestStatus}</p>}
               
-              <button 
-                onClick={handleRequest}
-                style={{ width: "100%", padding: 12, marginBottom: 12, background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-              >
-                <MapPin size={18} /> Request Stop at Next Station
-              </button>
-              
-              <button 
-                style={{ width: "100%", padding: 12, background: "#f59e0b", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-              >
-                <Bell size={18} /> Request Assistance
-              </button>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <input 
+                  type="text" 
+                  placeholder="Enter location (max 20 chars)" 
+                  value={locationName}
+                  onChange={(e) => setLocationName(e.target.value)}
+                  maxLength={20} 
+                  style={{ padding: 10, borderRadius: 6, border: "1px solid #ccc" }}
+                />
+                <button 
+                  onClick={() => {
+                    if (locationName.trim() === "") return alert("Please enter a location");
+                    sendRequest(locationName);
+                    setLocationName("");
+                  }}
+                  style={{ padding: 12, background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold" }}
+                >
+                  Send Stop Request
+                </button>
+
+                <div style={{ textAlign: "center", color: "#64748b", margin: "4px 0" }}>- OR -</div>
+
+                <button 
+                  onClick={getLocation}
+                  style={{ padding: 12, background: "#10b981", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+                >
+                  <Navigation size={18} /> Share My GPS Location
+                </button>
+              </div>
             </div>
           </div>
 
           <h3>Live Location</h3>
+          <LiveMap />
+        </div>
+      )}
+
+      {activeTab === "map" && (
+        <div>
+          <h3 style={{ marginTop: 0 }}>Live Bus Location</h3>
           <LiveMap />
         </div>
       )}

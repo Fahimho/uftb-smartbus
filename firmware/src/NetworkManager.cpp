@@ -45,7 +45,9 @@ void NetworkManager::connectMQTT() {
         Serial.println("[MQTT] Connected to EMQX Cloud!");
         mqttClient.subscribe("smartbus/BUS-01/request");
         mqttClient.subscribe("smartbus/BUS-01/camera"); // <-- Subscribe to camera topic
-        Serial.println("[MQTT] Subscribed to request and camera topics");
+        mqttClient.subscribe("smartbus/BUS-01/audio"); // <-- Subscribe to audio topic
+
+        Serial.println("[MQTT] Subscribed to request, camera, and audio topics");
     } else {
         Serial.print("[MQTT] Failed, rc=");
         Serial.println(mqttClient.state());
@@ -79,12 +81,18 @@ void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
             onMessage(message);
         } else if (t.indexOf("camera") > 0 && onCamera) {
             onCamera(message);
+               } else if (t.indexOf("audio") > 0 && onAudio) {
+            onAudio(message);
         }
     });
 }
 
 void NetworkManager::setCameraCallback(std::function<void(String)> callback) {
     onCamera = callback;
+}
+
+void NetworkManager::setAudioCallback(std::function<void(String)> callback) {
+    onAudio = callback;
 }
 
 bool NetworkManager::postAttendance(String uid, String type, String busId) {

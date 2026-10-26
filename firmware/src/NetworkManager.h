@@ -17,10 +17,11 @@ public:
     bool postAttendance(String uid, String type, String busId);
     bool postGPS(String busId, double lat, double lng, double speed, String status);
     bool postEmergency(String busId, double lat, double lng);
-    bool uploadPhoto(String requestId, String base64Image); // <-- New
+    bool uploadPhoto(String requestId, String base64Image);
     
     void setMessageCallback(std::function<void(String)> callback);
-    void setCameraCallback(std::function<void(String)> callback); // <-- New
+    void setCameraCallback(std::function<void(String)> callback);
+    void setAudioCallback(std::function<void(String)> callback); // <-- New
 
 private:
     const char* ssid;
@@ -32,6 +33,7 @@ private:
     PubSubClient mqttClient;
     
     std::function<void(String)> onMessage;
-    std::function<void(String)> onCamera; // <-- New
+    std::function<void(String)> onCamera;
+    std::function<void(String)> onAudio; // <--New
     void connectMQTT();
 };

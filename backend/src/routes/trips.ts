@@ -246,4 +246,29 @@ router.post("/photo/upload", async (req: Request, res: Response) => {
   }
 });
 
+// 12. Admin Sends Voice Message
+router.post("/audio/send", async (req: Request, res: Response) => {
+  try {
+    const { busId, audioBase64 } = req.body;
+    
+    // Save the audio file to Storage
+    const base64Data = audioBase64.replace(/^data:audio\/webm;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
+    const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
+    const fileName = `audio/${Date.now()}.webm`;
+    const file = bucket.file(fileName);
+    
+    await file.save(buffer, { metadata: { contentType: "audio/webm" } });
+
+    // Publish MQTT to alert the ESP32
+    const topic = `smartbus/${busId}/audio`;
+    mqttClient.publish(topic, JSON.stringify({ action: "PLAY_AUDIO", url: fileName }));
+
+    res.status(200).json({ message: "Audio sent to bus" });
+  } catch (error: any) {
+    console.error("Audio error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
