@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { useAuth } from "../context/AuthContext";
-import { LayoutDashboard, Bus, Map, AlertTriangle, Camera, Mic, LogOut } from "lucide-react";
+import { LayoutDashboard, Bus, Map, AlertTriangle, Camera, Mic, LogOut, Bell } from "lucide-react"; // <-- Added Bell
 
 interface LayoutProps {
   children: ReactNode;
@@ -14,7 +14,8 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
   const menuItems = [
     { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={20} />, roles: ["admin", "operator", "guest", "student"] },
     { id: "trips", label: "Trips & Attendance", icon: <Bus size={20} />, roles: ["admin", "operator"] },
-    { id: "map", label: "Live Map", icon: <Map size={20} />, roles: ["admin", "operator", "guest", "student"] }, // <-- Added student
+    { id: "messages", label: "Messages", icon: <Bell size={20} />, roles: ["operator"] }, // <-- Added Messages
+    { id: "map", label: "Live Map", icon: <Map size={20} />, roles: ["admin", "operator", "guest", "student"] },
     { id: "emergency", label: "Emergency", icon: <AlertTriangle size={20} />, roles: ["admin"] },
     { id: "camera", label: "Capture Photo", icon: <Camera size={20} />, roles: ["admin"] },
     { id: "audio", label: "Voice Messages", icon: <Mic size={20} />, roles: ["admin"] },
@@ -58,12 +59,10 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
           <h2 style={{ margin: 0, textTransform: "capitalize" }}>{activeTab.replace("-", " ")}</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ textAlign: "right" }}>
-              {/* FIXED: Added optional chaining and fallback */}
               <div style={{ fontWeight: 600, fontSize: 14 }}>{user?.displayName || "User"}</div>
               <div style={{ fontSize: 12, color: "#64748b", textTransform: "uppercase" }}>{user?.role || "Unknown"}</div>
             </div>
             <div style={{ width: 40, height: 40, borderRadius: "50%", background: "#3b82f6", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold" }}>
-              {/* FIXED: Added optional chaining and fallback */}
               {user?.displayName?.charAt(0) || "U"}
             </div>
           </div>

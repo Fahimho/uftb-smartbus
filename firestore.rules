@@ -63,7 +63,19 @@ service cloud.firestore {
       allow create, update: if true; 
     }
 
-    // 7. DEFAULT DENY (MUST BE LAST)
+    // 7. GPS History (For the blue trail line)
+    match /gpsHistory/{docId} {
+      allow read: if isAuthenticated();
+      allow create: if true; 
+    }
+        // 7.5 BUS REQUESTS (Student Stop Requests)
+    match /busRequests/{requestId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+    }
+
+    // 8. DEFAULT DENY
     match /{document=**} {
       allow read, write: if false;
     }
