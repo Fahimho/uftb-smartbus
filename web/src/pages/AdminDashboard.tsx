@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square } from "lucide-react";
+import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus } from "lucide-react";
 import { getFirestore, collection, onSnapshot, query, where } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
@@ -27,13 +27,19 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [events, setEvents] = useState<any[]>([]);
   const [emergencies, setEmergencies] = useState<any[]>([]);
+  const [allTrips, setAllTrips] = useState<any[]>([]);
   const [openMapFor, setOpenMapFor] = useState<string | null>(null);
   
+  // State for Admin viewing trip attendance
+  const [viewingTripId, setViewingTripId] = useState<string | null>(null);
+  const [viewingTripEvents, setViewingTripEvents] = useState<any[]>([]);
+
   // Audio recording state
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
+  // 1. Listen to Attendance Events
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "tripAttendance"), (snapshot) => {
       const eventList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
@@ -43,6 +49,7 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, []);
 
+  // 2. Listen to Emergencies
   useEffect(() => {
     const q = query(collection(db, "emergencyEvents"), where("status", "==", "ACTIVE"));
     const unsub = onSnapshot(q, (snapshot) => {
@@ -52,6 +59,28 @@ export default function AdminDashboard() {
     });
     return () => unsub();
   }, []);
+
+  // 3. Listen to ALL Trips
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "trips"), (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+      setAllTrips(list);
+    });
+    return () => unsub();
+  }, []);
+
+  // 4. Handle View Trip Attendance
+  const handleViewTrip = (tripId: string) => {
+    setViewingTripId(tripId);
+    const q = query(collection(db, "tripAttendance"), where("tripId", "==", tripId));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const evList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      setViewingTripEvents(evList);
+    });
+    return () => unsub();
+  };
 
   // Audio recording functions
   const startRecording = async () => {
@@ -160,6 +189,91 @@ export default function AdminDashboard() {
       )}
 
       {/* ========================================== */}
+      {/* TRIPS & ATTENDANCE TAB (WITH PASSENGER LIST) */}
+      {/* ========================================== */}
+      {activeTab === "trips" && (
+        <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
+          <h2 style={{ marginTop: 0 }}>Trip History</h2>
+          <p style={{ color: "#64748b" }}>Click on any row to view that trip's attendance.</p>
+          
+          {allTrips.length === 0 ? (
+            <p>No trips found.</p>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10 }}>
+              <thead>
+                <tr style={{ background: "#f8fafc", textAlign: "left", fontSize: 14, color: "#64748b" }}>
+                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Trip ID</th>
+                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Start Time</th>
+                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>End Time</th>
+                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allTrips.map(trip => (
+                  <tr 
+                    key={trip.id} 
+                    onClick={() => handleViewTrip(trip.id)}
+                    style={{ 
+                      borderTop: "1px solid #e2e8f0", 
+                      cursor: "pointer",
+                      background: viewingTripId === trip.id ? "#f0f9ff" : "transparent"
+                    }}
+                  >
+                    <td style={{ padding: "16px 24px", fontWeight: "bold", fontSize: 12 }}>{trip.id}</td>
+                    <td style={{ padding: "16px 24px", color: "#64748b" }}>{new Date(trip.startedAt).toLocaleString()}</td>
+                    <td style={{ padding: "16px 24px", color: "#64748b" }}>{trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "--"}</td>
+                    <td style={{ padding: "16px 24px" }}>
+                      <span style={{ background: trip.status === "IN_PROGRESS" ? "#dcfce7" : "#f1f5f9", color: trip.status === "IN_PROGRESS" ? "#166534" : "#475569", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>
+                        {trip.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* ATTENDANCE DETAILS FOR SELECTED TRIP */}
+          {viewingTripId && (
+            <div style={{ marginTop: 32, padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <h3 style={{ margin: 0 }}>Attendance for {viewingTripId}</h3>
+                <button onClick={() => setViewingTripId(null)} style={{ background: "transparent", border: "none", cursor: "pointer", color: "#64748b" }}>
+                  <X size={20} />
+                </button>
+              </div>
+              {viewingTripEvents.length === 0 ? (
+                <p>No students scanned during this trip.</p>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ background: "#e2e8f0", textAlign: "left", fontSize: 14, color: "#475569" }}>
+                      <th style={{ padding: "12px 16px", fontWeight: 600 }}>Time</th>
+                      <th style={{ padding: "12px 16px", fontWeight: 600 }}>Student</th>
+                      <th style={{ padding: "12px 16px", fontWeight: 600 }}>Card UID</th>
+                      <th style={{ padding: "12px 16px", fontWeight: 600 }}>Event</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {viewingTripEvents.map(ev => (
+                      <tr key={ev.id} style={{ borderTop: "1px solid #cbd5e1" }}>
+                        <td style={{ padding: "12px 16px", color: "#475569" }}>{new Date(ev.timestamp).toLocaleTimeString()}</td>
+                        <td style={{ padding: "12px 16px", fontWeight: "bold" }}>{ev.studentName || "Unknown"}</td>
+                        <td style={{ padding: "12px 16px" }}>{ev.uid}</td>
+                        <td style={{ padding: "12px 16px" }}>
+                          <span style={{ background: ev.type === "BOARDING" ? "#dbeafe" : "#fce7f3", color: ev.type === "BOARDING" ? "#1e40af" : "#9d174d", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>{ev.type}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================== */}
       {/* EMERGENCY TAB */}
       {/* ========================================== */}
       {activeTab === "emergency" && (
@@ -225,9 +339,9 @@ export default function AdminDashboard() {
       {/* LIVE MAP TAB */}
       {/* ========================================== */}
       {activeTab === "map" && (
-        <div>
+        <div style={{ padding: "32px 32px 0 32px" }}>
           <h3 style={{ marginTop: 0 }}>Live Fleet Map</h3>
-          <LiveMap />
+          <LiveMap userRole="admin" />
         </div>
       )}
 

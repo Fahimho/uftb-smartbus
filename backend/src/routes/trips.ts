@@ -19,11 +19,8 @@ router.post("/start", async (req: Request, res: Response) => {
     }
 
     const now = new Date();
-    
-    // Convert UTC to Bangladesh Time (UTC+6)
     const bdTime = new Date(now.getTime() + (6 * 60 * 60 * 1000));
     
-    // Format as DD-MM-YYYY-HHMM (Example: 27-10-2026-0108)
     const day = String(bdTime.getUTCDate()).padStart(2, '0');
     const month = String(bdTime.getUTCMonth() + 1).padStart(2, '0');
     const year = bdTime.getUTCFullYear();
@@ -40,7 +37,6 @@ router.post("/start", async (req: Request, res: Response) => {
     };
 
     await db.collection("trips").doc(tripId).set(tripData);
-    
     res.status(201).json({ message: "Trip started", tripId: tripId });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -51,11 +47,7 @@ router.post("/start", async (req: Request, res: Response) => {
 router.post("/end", async (req: Request, res: Response) => {
   try {
     const { busId } = req.body;
-
-    const activeTrips = await db.collection("trips")
-      .where("busId", "==", busId)
-      .where("status", "==", "IN_PROGRESS")
-      .get();
+    const activeTrips = await db.collection("trips").where("busId", "==", busId).where("status", "==", "IN_PROGRESS").get();
 
     if (activeTrips.empty) {
        res.status(400).json({ error: "No active trip found for this bus." });
@@ -63,21 +55,14 @@ router.post("/end", async (req: Request, res: Response) => {
     }
 
     const tripDoc = activeTrips.docs[0]!;
-
     await tripDoc.ref.update({
       status: "COMPLETED",
       endedAt: new Date().toISOString(),
     });
 
-    // Clear the GPS History for this bus
-    const historySnapshot = await db.collection("gpsHistory")
-      .where("busId", "==", busId)
-      .get();
-      
+    const historySnapshot = await db.collection("gpsHistory").where("busId", "==", busId).get();
     const batch = db.batch();
-    historySnapshot.docs.forEach((doc) => {
-      batch.delete(doc.ref);
-    });
+    historySnapshot.docs.forEach((doc) => { batch.delete(doc.ref); });
     await batch.commit();
 
     res.status(200).json({ message: "Trip ended and GPS trail cleared" });
@@ -89,7 +74,7 @@ router.post("/end", async (req: Request, res: Response) => {
 // 3. Record Attendance
 router.post("/attendance", async (req: Request, res: Response) => {
   try {
-    const { uid, type, busId, studentName } = req.body; // <-- Added studentName
+    const { uid, type, busId, studentName } = req.body;
 
     if (!uid || !type || !busId) {
        res.status(400).json({ error: "Missing uid, type, or busId" });
@@ -104,13 +89,9 @@ router.post("/attendance", async (req: Request, res: Response) => {
     }
 
     const tripId = activeTrips.docs[0]!.id;
-
     const eventData = {
-      uid: uid,
-      type: type,
-      busId: busId,
-      tripId: tripId,
-      studentName: studentName || "Unknown", // <-- Save it
+      uid, type, busId, tripId,
+      studentName: studentName || "Unknown",
       timestamp: new Date().toISOString(),
     };
 
@@ -125,7 +106,6 @@ router.post("/attendance", async (req: Request, res: Response) => {
 router.post("/gps", async (req: Request, res: Response) => {
   try {
     const { busId, lat, lng, speed, status } = req.body;
-    
     await db.collection("buses").doc(busId).set({
       busId: busId,
       lastLocation: {
@@ -155,12 +135,8 @@ router.post("/emergency", async (req: Request, res: Response) => {
   try {
     const { busId, lat, lng } = req.body;
     const emergencyData = {
-      busId,
-      lat: lat || 0,
-      lng: lng || 0,
-      status: "ACTIVE",
-      timestamp: new Date().toISOString(),
-      cellularNotification: "not_configured" 
+      busId, lat: lat || 0, lng: lng || 0, status: "ACTIVE",
+      timestamp: new Date().toISOString(), cellularNotification: "not_configured" 
     };
     const docRef = await db.collection("emergencyEvents").add(emergencyData);
     res.status(201).json({ message: "Emergency recorded", eventId: docRef.id });
@@ -185,8 +161,7 @@ router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     await db.collection("emergencyEvents").doc(id).update({
-      status: "RESOLVED",
-      resolvedAt: new Date().toISOString()
+      status: "RESOLVED", resolvedAt: new Date().toISOString()
     });
     res.json({ message: "Emergency resolved" });
   } catch (error: any) {
@@ -194,10 +169,10 @@ router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
   }
 });
 
-// 8. Student Request (Publishes to MQTT) - NOW SAVES LAT/LNG
+// 8. Student Request (Publishes to MQTT) - NOW SAVES UID
 router.post("/request", async (req: Request, res: Response) => {
   try {
-    const { busId, message, studentName, lat, lng } = req.body;
+    const { busId, message, studentName, lat, lng, studentUid } = req.body;
     
     if (!message || message.length > 35) { 
        res.status(400).json({ error: "Message too long for bus display" });
@@ -208,11 +183,11 @@ router.post("/request", async (req: Request, res: Response) => {
       busId, 
       message, 
       studentName: studentName || "Unknown Student",
+      studentUid: studentUid || "unknown", // <-- SAVED HERE FOR THE MAP
       status: "PENDING", 
       timestamp: new Date().toISOString() 
     };
 
-    // If GPS coordinates were provided, save them
     if (lat !== undefined && lng !== undefined) {
       requestData.lat = Number(lat);
       requestData.lng = Number(lng);
@@ -242,7 +217,6 @@ router.get("/request/:busId", async (req: Request, res: Response) => {
 
     const requestDoc = snapshot.docs[0]!;
     const requestData = requestDoc.data();
-
     await requestDoc.ref.update({ status: "DELIVERED" });
 
     res.json({ hasRequest: true, message: requestData.message });
@@ -255,11 +229,8 @@ router.get("/request/:busId", async (req: Request, res: Response) => {
 router.post("/photo/request", async (req: Request, res: Response) => {
   try {
     const { busId } = req.body;
-    
     const requestData = {
-      busId,
-      status: "PENDING",
-      timestamp: new Date().toISOString()
+      busId, status: "PENDING", timestamp: new Date().toISOString()
     };
     const docRef = await db.collection("capturePhotoRequests").add(requestData);
 
@@ -276,25 +247,19 @@ router.post("/photo/request", async (req: Request, res: Response) => {
 router.post("/photo/upload", async (req: Request, res: Response) => {
   try {
     const { requestId, imageBase64 } = req.body;
-    
     const base64Data = imageBase64.replace(/^data:image\/jpeg;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
-    
     const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
     const file = bucket.file(`photos/${requestId}.jpg`);
     
-    await file.save(buffer, {
-      metadata: { contentType: "image/jpeg" }
-    });
+    await file.save(buffer, { metadata: { contentType: "image/jpeg" } });
 
     await db.collection("capturePhotoRequests").doc(requestId).update({
-      status: "STORED",
-      uploadedAt: new Date().toISOString()
+      status: "STORED", uploadedAt: new Date().toISOString()
     });
 
     res.status(200).json({ message: "Photo saved to storage" });
   } catch (error: any) {
-    console.error("Photo upload error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -303,7 +268,6 @@ router.post("/photo/upload", async (req: Request, res: Response) => {
 router.post("/audio/send", async (req: Request, res: Response) => {
   try {
     const { busId, audioBase64 } = req.body;
-    
     const base64Data = audioBase64.replace(/^data:audio\/webm;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
     const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
@@ -317,7 +281,6 @@ router.post("/audio/send", async (req: Request, res: Response) => {
 
     res.status(200).json({ message: "Audio sent to bus" });
   } catch (error: any) {
-    console.error("Audio error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -326,7 +289,6 @@ router.post("/audio/send", async (req: Request, res: Response) => {
 router.post("/audio/upload", async (req: Request, res: Response) => {
   try {
     const { busId, audioBase64 } = req.body;
-    
     const base64Data = audioBase64.replace(/^data:audio\/wav;base64,/, "");
     const buffer = Buffer.from(base64Data, "base64");
     const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
@@ -334,11 +296,8 @@ router.post("/audio/upload", async (req: Request, res: Response) => {
     const file = bucket.file(fileName);
     
     await file.save(buffer, { metadata: { contentType: "audio/wav" } });
-
     await db.collection("busVoiceInbox").add({
-      busId,
-      fileName,
-      uploadedAt: new Date().toISOString(),
+      busId, fileName, uploadedAt: new Date().toISOString(),
     });
 
     res.status(200).json({ message: "Audio uploaded to admin" });

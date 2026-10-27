@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth } from "../firebase";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../context/AuthContext";
 import toast from "react-hot-toast";
 
 export default function Login() {
@@ -12,23 +11,27 @@ export default function Login() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   
   const navigate = useNavigate();
-  const { user, loading } = useAuth();
 
+  // Force sign out the moment the Login page loads.
+  // This clears any cached session from previous tabs.
   useEffect(() => {
-    if (user && !loading) {
-      navigate("/"); 
-    }
-  }, [user, loading, navigate]);
+    signOut(auth).catch(() => {}); // Ignore errors if not logged in
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoggingIn(true);
     
     try {
-      await signInWithEmailAndPassword(auth, email, password);
-      toast.success("Welcome back!");
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      
+      // Wait until Firebase actually confirms the user session
+      if (userCredential.user) {
+        toast.success(`Welcome back!`);
+        navigate("/"); 
+      }
+      
     } catch (err: any) {
-      // Professional error handling instead of red text box
       if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
         toast.error("Invalid email or password.");
       } else {

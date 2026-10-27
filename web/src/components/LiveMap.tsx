@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { getFirestore, doc, onSnapshot, collection, query, where } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
-import { useAuth } from '../context/AuthContext'; // Import user context to identify "self"
+import { useAuth } from '../context/AuthContext';
 
 // 1. Fix Leaflet Default Icons
 import icon from 'leaflet/dist/images/marker-icon.png';
@@ -15,8 +15,29 @@ L.Marker.prototype.options.icon = DefaultIcon;
 const db = getFirestore();
 connectFirestoreEmulator(db, "127.0.0.1", 8080);
 
+// Custom Zoom Controls inside the map
+function CustomZoomControls() {
+  const map = useMap();
+  return (
+    <div style={{ position: "absolute", top: 60, right: 12, zIndex: 1000, display: "flex", flexDirection: "column", gap: 8 }}>
+      <button 
+        onClick={() => map.zoomIn()} 
+        style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}
+      >
+        +
+      </button>
+      <button 
+        onClick={() => map.zoomOut()} 
+        style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}
+      >
+        -
+      </button>
+    </div>
+  );
+}
+
 export default function LiveMap({ userRole = "operator" }: { userRole?: string }) {
-  const { user } = useAuth(); // Get current logged-in user
+  const { user } = useAuth();
   const [busData, setBusData] = useState<any>(null);
   const [history, setHistory] = useState<[number, number][]>([]);
   const [requests, setRequests] = useState<any[]>([]);
@@ -27,7 +48,6 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
 
   const defaultCenter: [number, number] = [24.065111, 90.222806];
 
-  // Icons
   const busIcon = new L.DivIcon({
     html: `<div style="font-size: 24px;">🚌</div>`,
     className: 'bus-icon',
@@ -122,80 +142,87 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
       
-      {/* Banners */}
-      {!busData && (
-        <div style={{ background: "#fef3c7", padding: "16px", marginBottom: 16, borderRadius: 8, textAlign: "center", fontWeight: "bold", color: "#b45309", border: "1px solid #f59e0b" }}>
-          ⚠️ Waiting for bus to send GPS data...
-        </div>
-      )}
-      {busData && !isStale && !checking && (
-        <div style={{ background: "#dcfce7", padding: "12px 24px", marginBottom: 16, borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#166534", border: "1px solid #10b981" }}>
-          <span>🟢 BUS-01 is {busData.status}</span>
-          <span>Live: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
-        </div>
-      )}
-      {busData && isStale && !checking && (
-        <div style={{ background: "#fee2e2", padding: "12px 24px", marginBottom: 16, borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#991b1b", border: "1px solid #ef4444" }}>
-          <span>🔴 GPS OFFLINE - Last known location</span>
-          <span>Last Seen: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
-        </div>
-      )}
+      {/* STICKY BANNER - Sticks to top of scroll container */}
+      <div style={{ 
+        position: "sticky", 
+        top: 0, 
+        zIndex: 1000, 
+        background: "#f3f4f6", 
+        padding: "16px 32px", 
+      }}>
+        {!busData && (
+          <div style={{ background: "#fef3c7", padding: "16px", borderRadius: 8, textAlign: "center", fontWeight: "bold", color: "#b45309", border: "1px solid #f59e0b" }}>
+            ⚠️ Waiting for bus to send GPS data...
+          </div>
+        )}
+        {busData && !isStale && !checking && (
+          <div style={{ background: "#dcfce7", padding: "12px 24px", borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#166534", border: "1px solid #10b981" }}>
+            <span>🟢 BUS-01 is {busData.status}</span>
+            <span>Live: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
+          </div>
+        )}
+        {busData && isStale && !checking && (
+          <div style={{ background: "#fee2e2", padding: "12px 24px", borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#991b1b", border: "1px solid #ef4444" }}>
+            <span>🔴 GPS OFFLINE - Last known location</span>
+            <span>Last Seen: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
+          </div>
+        )}
+      </div>
 
-      <div style={{ height: "600px", width: "100%", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
-        <MapContainer center={center} zoom={14} style={{ height: "100%", width: "100%" }}>
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          
-          {history.length > 1 && <Polyline positions={history} color="#3b82f6" weight={5} opacity={0.8} />}
-
-          {/* Bus Marker */}
-          {busData && (
-            <Marker position={center} icon={isOperator ? busIcon : DefaultIcon}>
-              <Popup>
-                <strong>BUS-01</strong><br />
-                Status: {isStale ? "OFFLINE" : busData.status}<br />
-                Speed: {busData.speed} km/h
-              </Popup>
-            </Marker>
-          )}
-
-          {/* Student Requests / Own Location */}
-          {requests.map((req, idx) => {
-            const isSelf = req.studentName === user?.displayName;
+      {/* MAP */}
+      <div style={{ padding: "0 32px 32px 32px" }}>
+        <div style={{ position: "relative", height: "600px", width: "100%", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
+          <MapContainer center={center} zoom={14} style={{ height: "100%", width: "100%" }} zoomControl={false}>
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
             
-            // Hide if bus is already there and stopped, OR if they boarded
-            const distanceNum = busData ? Number(calcDistance(busData.lat, busData.lng, req.lat, req.lng)) : 999;
-            const busIsHere = distanceNum < 0.05 && busData?.speed < 2;
-            const hasBoarded = attendance.some(
-              (att) => att.studentName === req.studentName && att.type === "BOARDING"
-            );
-            
-            if (hasBoarded || busIsHere) return null;
+            <CustomZoomControls />
 
-            // If the viewer is a student, ONLY show their own dot. Operators see all.
-            if (!isOperator && !isSelf) return null;
+            {history.length > 1 && <Polyline positions={history} color="#3b82f6" weight={5} opacity={0.8} />}
 
-            return (
-              <React.Fragment key={idx}>
-                {busData && (
-                  <Polyline 
-                    positions={[[busData.lat, busData.lng], [req.lat, req.lng]]} 
-                    color="#10b981" 
-                    weight={3} 
-                    dashArray="5, 10" 
-                  />
-                )}
-                
-                <Marker position={[req.lat, req.lng]} icon={isOperator ? studentIcon : DefaultIcon}>
-                  <Popup>
-                    <strong>{req.studentName}</strong><br />
-                    Message: {req.message}<br />
-                    <strong>Distance:</strong> {distanceNum} km
-                  </Popup>
-                </Marker>
-              </React.Fragment>
-            );
-          })}
-        </MapContainer>
+            {busData && (
+              <Marker position={center} icon={isOperator ? busIcon : DefaultIcon}>
+                <Popup>
+                  <strong>BUS-01</strong><br />
+                  Status: {isStale ? "OFFLINE" : busData.status}<br />
+                  Speed: {busData.speed} km/h
+                </Popup>
+              </Marker>
+            )}
+
+            {requests.map((req, idx) => {
+              const isSelf = req.studentName === user?.displayName;
+              const distanceNum = busData ? Number(calcDistance(busData.lat, busData.lng, req.lat, req.lng)) : 999;
+              const busIsHere = distanceNum < 0.05 && busData?.speed < 2;
+              const hasBoarded = attendance.some(
+                (att) => att.studentName === req.studentName && att.type === "BOARDING"
+              );
+              
+              if (hasBoarded || busIsHere) return null;
+              if (!isOperator && !isSelf) return null;
+
+              return (
+                <React.Fragment key={idx}>
+                  {busData && (
+                    <Polyline 
+                      positions={[[busData.lat, busData.lng], [req.lat, req.lng]]} 
+                      color="#10b981" 
+                      weight={3} 
+                      dashArray="5, 10" 
+                    />
+                  )}
+                  
+                  <Marker position={[req.lat, req.lng]} icon={isOperator ? studentIcon : DefaultIcon}>
+                    <Popup>
+                      <strong>{req.studentName}</strong><br />
+                      Message: {req.message}<br />
+                      <strong>Distance:</strong> {distanceNum} km
+                    </Popup>
+                  </Marker>
+                </React.Fragment>
+              );
+            })}
+          </MapContainer>
+        </div>
       </div>
     </div>
   );
