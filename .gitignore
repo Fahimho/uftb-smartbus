@@ -1,5 +1,6 @@
 # Node
 node_modules/
+web/node_modules/  <-- Added this explicitly for your web folder
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*
@@ -14,6 +15,12 @@ build/
 *.pem
 *.key
 service-account*.json
+
+# Firebase Emulator Data & Logs (From your screenshot)
+emulator-data/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
 
 # Firmware build artifacts
 firmware/.pio/
