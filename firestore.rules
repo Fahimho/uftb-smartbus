@@ -8,8 +8,10 @@ service cloud.firestore {
     }
 
     // Helper function: Check if the user has a specific role
+    // FIXED: Added exists() check to prevent evaluation errors if user doc is missing
     function hasRole(role) {
       return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
     }
 
@@ -46,7 +48,7 @@ service cloud.firestore {
       allow update: if isAdminOrOperator(); 
     }
 
-    // 5. TRIPS & ATTENDANCE
+    // 5. TRIPS & ATTENDANCE (Students blocked here)
     match /trips/{tripId} {
       allow read, write: if isAdminOrOperator();
     }
@@ -68,7 +70,8 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow create: if true; 
     }
-        // 7.5 BUS REQUESTS (Student Stop Requests)
+
+    // 7.5 BUS REQUESTS (Student Stop Requests)
     match /busRequests/{requestId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated();

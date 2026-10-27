@@ -13,7 +13,11 @@ let DefaultIcon = L.icon({ iconUrl: icon, shadowUrl: iconShadow, iconSize: [25, 
 L.Marker.prototype.options.icon = DefaultIcon;
 
 const db = getFirestore();
-connectFirestoreEmulator(db, "127.0.0.1", 8080);
+
+// FIXED: Only connect to emulator if running on localhost to prevent production crashes
+if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+}
 
 // Custom Zoom Controls inside the map
 function CustomZoomControls() {
@@ -45,6 +49,9 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
   const [loading, setLoading] = useState(true);
   const [isStale, setIsStale] = useState(false);
   const [checking, setChecking] = useState(true); 
+
+  // FIXED: Define isOperator early so we can use it in the useEffect hooks
+  const isOperator = userRole === "operator" || userRole === "admin";
 
   const defaultCenter: [number, number] = [24.065111, 90.222806];
 
@@ -104,14 +111,20 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
   }, []);
 
   // 4. Listen to Attendance
+  // FIXED: Only operators are allowed to query this. Students skip it to prevent permission errors.
   useEffect(() => {
+    if (!isOperator) {
+      setAttendance([]); // Clear attendance for students
+      return;
+    }
+
     const q = query(collection(db, "tripAttendance"), where("busId", "==", "BUS-01"));
     const unsub = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(d => d.data());
       setAttendance(list);
     });
     return () => unsub();
-  }, []);
+  }, [isOperator]); // Add isOperator to dependency array
 
   // 5. Stale data checker
   useEffect(() => {
@@ -137,7 +150,6 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
 
   if (loading) return <div style={{ padding: 20 }}>Loading Map...</div>;
   const center: [number, number] = busData ? [busData.lat, busData.lng] : defaultCenter;
-  const isOperator = userRole === "operator" || userRole === "admin";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
@@ -190,7 +202,9 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
             )}
 
             {requests.map((req, idx) => {
-              const isSelf = req.studentName === user?.displayName;
+              // FIXED: Check by UID if available, fallback to displayName
+              const isSelf = req.studentId === user?.uid || req.studentName === user?.displayName;
+              
               const distanceNum = busData ? Number(calcDistance(busData.lat, busData.lng, req.lat, req.lng)) : 999;
               const busIsHere = distanceNum < 0.05 && busData?.speed < 2;
               const hasBoarded = attendance.some(
