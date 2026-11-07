@@ -130,10 +130,17 @@ router.post("/end", async (req: Request, res: Response) => {
       endedAt: new Date().toISOString(),
     });
 
+    // BETTER DELETION: Use batch delete to ensure nothing is missed
     const historySnapshot = await db.collection("gpsHistory").where("busId", "==", busId).get();
-    const batch = db.batch();
-    historySnapshot.docs.forEach((doc) => { batch.delete(doc.ref); });
-    await batch.commit();
+    
+    if (!historySnapshot.empty) {
+      const batch = db.batch();
+      historySnapshot.docs.forEach((doc) => { 
+        batch.delete(doc.ref); 
+      });
+      await batch.commit();
+      console.log(`[CLEANUP] Deleted ${historySnapshot.size} GPS points for ${busId}`);
+    }
 
     res.status(200).json({ message: "Trip ended and GPS trail cleared" });
   } catch (error: any) {

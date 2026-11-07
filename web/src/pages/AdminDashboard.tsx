@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus, Trash2, Wifi } from "lucide-react";
+import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus, Trash2, Wifi, UserPlus, Users, Eye, EyeOff } from "lucide-react";
 import { getFirestore, collection, onSnapshot, query, where, doc, deleteDoc } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
@@ -10,6 +10,8 @@ import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import toast from "react-hot-toast";
+import { useAuth } from "../context/AuthContext";
+import { auth } from "../firebase";
 
 // Fix Leaflet icons
 import icon from 'leaflet/dist/images/marker-icon.png';
@@ -24,6 +26,7 @@ const storage = getStorage();
 connectStorageEmulator(storage, "127.0.0.1", 9199);
 
 export default function AdminDashboard() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState("dashboard");
   const [events, setEvents] = useState<any[]>([]);
   const [emergencies, setEmergencies] = useState<any[]>([]);
@@ -45,13 +48,21 @@ export default function AdminDashboard() {
 
   // Fleet Setup Form State
   const [busName, setBusName] = useState("");
-  const [busIp, setBusIp] = useState(""); // NEW
+  const [busIp, setBusIp] = useState("");
   const [route, setRoute] = useState("");
   const [driverName, setDriverName] = useState("");
   const [driverPhone, setDriverPhone] = useState("");
   const [helperName, setHelperName] = useState("");
   const [helperPhone, setHelperPhone] = useState("");
   const [emergencyContacts, setEmergencyContacts] = useState<string[]>([]);
+
+  // Staff Management State
+  const [staffList, setStaffList] = useState<any[]>([]);
+  const [newStaffName, setNewStaffName] = useState("");
+  const [newStaffEmail, setNewStaffEmail] = useState("");
+  const [newStaffPassword, setNewStaffPassword] = useState("");
+  const [newStaffBusId, setNewStaffBusId] = useState("");
+  const [showStaffPassword, setShowStaffPassword] = useState(false); // <-- NEW
 
   // State for Admin viewing trip attendance
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
@@ -93,7 +104,17 @@ export default function AdminDashboard() {
     return () => unsub();
   }, []);
 
-  // 4. Fetch ALL Buses on mount
+  // 4. Listen to all Operators (Staff)
+  useEffect(() => {
+    const q = query(collection(db, "users"), where("role", "==", "operator"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      setStaffList(list);
+    });
+    return () => unsub();
+  }, []);
+
+  // 5. Fetch ALL Buses on mount
   const fetchAllBuses = () => {
     fetch("http://localhost:5000/api/trips/buses")
       .then(res => res.json())
@@ -110,7 +131,7 @@ export default function AdminDashboard() {
     fetchAllBuses();
   }, []);
 
-  // 5. Load Fleet Setup when selectedBusId changes
+  // 6. Load Fleet Setup when selectedBusId changes
   useEffect(() => {
     if (!selectedBusId) return;
     
@@ -119,7 +140,7 @@ export default function AdminDashboard() {
       .then(data => {
         if (data.busId) {
           setBusName(data.busName || "");
-          setBusIp(data.lastIp || "Waiting for connection..."); // <-- NEW
+          setBusIp(data.lastIp || "Waiting for connection...");
           setRoute(data.route || "");
           setDriverName(data.driverName || "");
           setDriverPhone(data.driverPhone || "");
@@ -127,9 +148,8 @@ export default function AdminDashboard() {
           setHelperPhone(data.helperPhone || "");
           setEmergencyContacts(data.emergencyContacts || [""]);
         } else {
-          // If new bus
           setBusName("");
-          setBusIp("Waiting for connection..."); // <-- NEW
+          setBusIp("Waiting for connection...");
           setRoute("");
           setDriverName("");
           setDriverPhone("");
@@ -162,6 +182,67 @@ export default function AdminDashboard() {
       fetchAllBuses();
     } catch (err) {
       toast.error("Failed to save setup", { id: loading });
+    }
+  };
+
+  // Create Operator (Staff)
+  const handleCreateStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStaffEmail || !newStaffPassword || !newStaffBusId) {
+      return toast.error("Please fill all fields");
+    }
+
+    const loading = toast.loading("Creating staff account...");
+    
+    try {
+      // 1. Get the current Admin's token from Firebase Auth directly
+      const token = await auth.currentUser?.getIdToken();
+      
+      if (!token) {
+        toast.error("Session expired. Please log in again.", { id: loading });
+        return;
+      }
+
+      // 2. Call the secure backend route
+      const res = await fetch("http://localhost:5000/api/auth/register-staff", {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}` 
+        },
+        body: JSON.stringify({
+          email: newStaffEmail,
+          password: newStaffPassword,
+          displayName: newStaffName,
+          role: "operator",
+          assignedBusId: newStaffBusId
+        })
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        toast.success("Operator created successfully!", { id: loading });
+        setNewStaffName("");
+        setNewStaffEmail("");
+        setNewStaffPassword("");
+        setNewStaffBusId("");
+      } else {
+        toast.error(data.error || "Backend rejected the request", { id: loading });
+      }
+    } catch (err: any) {
+      console.error("Fetch Error:", err);
+      toast.error(`Error: ${err.message}`, { id: loading });
+    }
+  };
+  // Delete Operator (Staff)
+  const handleDeleteStaff = async (staffId: string, staffName: string) => {
+    if (!window.confirm(`Are you sure you want to delete ${staffName}?`)) return;
+    try {
+      await deleteDoc(doc(db, "users", staffId));
+      toast.success(`Deleted ${staffName}`);
+    } catch (err) {
+      toast.error("Failed to delete staff");
     }
   };
 
@@ -198,7 +279,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // 6. Handle View Trip Attendance
+  // Handle View Trip Attendance
   const handleViewTrip = (tripId: string) => {
     setViewingTripId(tripId);
     const q = query(collection(db, "tripAttendance"), where("tripId", "==", tripId));
@@ -256,6 +337,7 @@ export default function AdminDashboard() {
 
   // Helper to get bus name
   const getBusName = (busId: string) => {
+    if (!busId) return "Not Assigned";
     const bus = allBuses.find(b => b.busId === busId);
     return bus ? bus.busName || "Unnamed" : busId;
   };
@@ -556,7 +638,7 @@ export default function AdminDashboard() {
               <>
                 <h2 style={{ marginTop: 0 }}>Setup: {selectedBusId}</h2>
                 
-                {/* NEW: Show IP Address */}
+                {/* IP Address Box */}
                 <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, marginBottom: 24 }}>
                   <Wifi size={20} color="#166534" />
                   <div>
@@ -647,6 +729,100 @@ export default function AdminDashboard() {
                   </button>
                 </div>
               </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* NEW: STAFF MANAGEMENT TAB */}
+      {/* ========================================== */}
+      {activeTab === "staff" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          
+          {/* Create Staff Form */}
+          <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+              <UserPlus size={24} color="#3b82f6" />
+              <h2 style={{ margin: 0 }}>Create New Operator</h2>
+            </div>
+            
+            <form onSubmit={handleCreateStaff} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <input placeholder="Full Name" value={newStaffName} onChange={e => setNewStaffName(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} required />
+              <input type="email" placeholder="Email Address" value={newStaffEmail} onChange={e => setNewStaffEmail(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} required />
+              
+              {/* PASSWORD FIELD WITH EYE ICON */}
+              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                <input 
+                  type={showStaffPassword ? "text" : "password"} 
+                  placeholder="Password (min 6 chars)" 
+                  value={newStaffPassword} 
+                  onChange={e => setNewStaffPassword(e.target.value)} 
+                  style={{ width: "100%", padding: 10, paddingRight: 40, borderRadius: 6, border: "1px solid #cbd5e1" }} 
+                  required 
+                />
+                <div 
+                  onClick={() => setShowStaffPassword(!showStaffPassword)}
+                  style={{ position: "absolute", right: 12, cursor: "pointer", color: "#94a3b8" }}
+                >
+                  {showStaffPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </div>
+              </div>
+
+              <select value={newStaffBusId} onChange={e => setNewStaffBusId(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} required>
+                <option value="">-- Assign to Bus --</option>
+                {allBuses.map(b => (
+                  <option key={b.busId} value={b.busId}>{b.busName || "Unnamed"} ({b.busId})</option>
+                ))}
+              </select>
+              
+              <button type="submit" style={{ gridColumn: "span 2", padding: "12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, fontWeight: "bold", fontSize: 16, cursor: "pointer" }}>
+                Create Operator Account
+              </button>
+            </form>
+          </div>
+
+          {/* Staff List */}
+          <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+              <Users size={24} color="#3b82f6" />
+              <h2 style={{ margin: 0 }}>Active Operators</h2>
+            </div>
+
+            {staffList.length === 0 ? (
+              <p style={{ color: "#64748b" }}>No operators created yet.</p>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc", textAlign: "left", fontSize: 14, color: "#64748b" }}>
+                    <th style={{ padding: "16px", fontWeight: 600 }}>Name</th>
+                    <th style={{ padding: "16px", fontWeight: 600 }}>Email</th>
+                    <th style={{ padding: "16px", fontWeight: 600 }}>Assigned Bus</th>
+                    <th style={{ padding: "16px", fontWeight: 600 }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {staffList.map(staff => (
+                    <tr key={staff.id} style={{ borderTop: "1px solid #e2e8f0" }}>
+                      <td style={{ padding: "16px", fontWeight: "bold" }}>{staff.displayName || "Unknown"}</td>
+                      <td style={{ padding: "16px", color: "#64748b" }}>{staff.email}</td>
+                      <td style={{ padding: "16px" }}>
+                        <span style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>
+                          {getBusName(staff.assignedBusId)}
+                        </span>
+                      </td>
+                      <td style={{ padding: "16px" }}>
+                        <button 
+                          onClick={() => handleDeleteStaff(staff.id, staff.displayName)}
+                          style={{ padding: "6px 12px", background: "#fee2e2", color: "#b91c1c", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
         </div>

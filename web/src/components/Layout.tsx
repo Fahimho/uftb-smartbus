@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { useAuth } from "../context/AuthContext";
-import { LayoutDashboard, Bus, Map, AlertTriangle, Camera, Mic, LogOut, Bell, Settings } from "lucide-react";
+import { LayoutDashboard, Bus, Map, AlertTriangle, Camera, Mic, LogOut, Bell, Settings, Users } from "lucide-react";
 
 interface LayoutProps {
   children: ReactNode;
@@ -20,6 +20,7 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
     { id: "emergency", label: "Emergency", icon: <AlertTriangle size={20} />, roles: ["admin"] },
     { id: "camera", label: "Capture Photo", icon: <Camera size={20} />, roles: ["admin"] },
     { id: "audio", label: "Voice Messages", icon: <Mic size={20} />, roles: ["admin"] },
+    { id: "staff", label: "Staff Management", icon: <Users size={20} />, roles: ["admin"] },
   ];
 
   return (

@@ -14,33 +14,31 @@ L.Marker.prototype.options.icon = DefaultIcon;
 
 const db = getFirestore();
 
-// FIXED: Only connect to emulator if running on localhost to prevent production crashes
+// FIXED: Only connect to emulator if running on localhost
 if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
 }
 
-// Custom Zoom Controls inside the map
+// Custom Zoom Controls
 function CustomZoomControls() {
   const map = useMap();
   return (
     <div style={{ position: "absolute", top: 60, right: 12, zIndex: 1000, display: "flex", flexDirection: "column", gap: 8 }}>
-      <button 
-        onClick={() => map.zoomIn()} 
-        style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}
-      >
-        +
-      </button>
-      <button 
-        onClick={() => map.zoomOut()} 
-        style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}
-      >
-        -
-      </button>
+      <button onClick={() => map.zoomIn()} style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>+</button>
+      <button onClick={() => map.zoomOut()} style={{ width: 36, height: 36, background: "white", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 20, fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>-</button>
     </div>
   );
 }
 
-// NEW: Accept targetBusId prop
+// NEW: Component to auto-follow the bus
+function MapFollower({ center }: { center: [number, number] }) {
+  const map = useMap();
+  useEffect(() => {
+    map.panTo(center);
+  }, [center, map]);
+  return null;
+}
+
 export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" }: { userRole?: string, targetBusId?: string }) {
   const { user } = useAuth();
   const [busData, setBusData] = useState<any>(null);
@@ -56,10 +54,10 @@ export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" 
   const defaultCenter: [number, number] = [24.065111, 90.222806];
 
   const busIcon = new L.DivIcon({
-    html: `<div style="font-size: 24px;">🚌</div>`,
+    html: `<div style="font-size: 28px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">🚌</div>`,
     className: 'bus-icon',
-    iconSize: [30, 30],
-    iconAnchor: [15, 15]
+    iconSize: [36, 36],
+    iconAnchor: [18, 18]
   });
 
   const studentIcon = new L.DivIcon({
@@ -69,7 +67,7 @@ export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" 
     iconAnchor: [10, 10]
   });
 
-  // 0. Fetch bus name whenever targetBusId changes
+  // 0. Fetch bus name
   useEffect(() => {
     if (!targetBusId) return;
     const unsub = onSnapshot(doc(db, "buses", targetBusId), (docSnap) => {
@@ -127,7 +125,7 @@ export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" 
     return () => unsub();
   }, [targetBusId]);
 
-  // 4. Listen to Attendance
+  // 4. Listen to Attendance (Operator/Admin only)
   useEffect(() => {
     if (!isOperator || !targetBusId) {
       setAttendance([]); 
@@ -179,7 +177,7 @@ export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" 
         )}
         {busData && !isStale && !checking && (
           <div style={{ background: "#dcfce7", padding: "12px 24px", borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#166534", border: "1px solid #10b981" }}>
-            <span>🟢 {busName} ({targetBusId}) is {busData.status}</span>
+            <span>🟢 {busName} ({targetBusId}) is {busData.status} at {busData.speed} km/h</span>
             <span>Live: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
           </div>
         )}
@@ -198,19 +196,28 @@ export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" 
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
             
             <CustomZoomControls />
+            {busData && <MapFollower center={center} />}
 
-            {history.length > 1 && <Polyline positions={history} color="#3b82f6" weight={5} opacity={0.8} />}
+            {/* GPS Trail */}
+            {history.length > 1 && (
+              <Polyline positions={history} color="#3b82f6" weight={5} opacity={0.8} />
+            )}
 
+            {/* Current Bus Position */}
             {busData && (
               <Marker position={center} icon={isOperator ? busIcon : DefaultIcon}>
                 <Popup>
-                  <strong>{busName} ({targetBusId})</strong><br />
-                  Status: {isStale ? "OFFLINE" : busData.status}<br />
-                  Speed: {busData.speed} km/h
+                  <div style={{ textAlign: "center" }}>
+                    <strong>{busName} ({targetBusId})</strong><br />
+                    Status: <span style={{ color: isStale ? "red" : "green" }}>{isStale ? "OFFLINE" : busData.status}</span><br />
+                    Speed: {busData.speed} km/h<br />
+                    <small>Updated: {new Date(busData.updatedAt).toLocaleTimeString()}</small>
+                  </div>
                 </Popup>
               </Marker>
             )}
 
+            {/* Student Requests */}
             {requests.map((req, idx) => {
               const isSelf = req.studentId === user?.uid || req.studentName === user?.displayName;
               const distanceNum = busData ? Number(calcDistance(busData.lat, busData.lng, req.lat, req.lng)) : 999;

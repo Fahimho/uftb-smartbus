@@ -56,21 +56,19 @@ router.post("/register", async (req: Request, res: Response) => {
 // 2. PROTECTED REGISTRATION (For Admins/Operators)
 router.post("/register-staff", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    // 1. Check if the person making the request is an Admin
     const requesterDoc = await db.collection("users").doc(req.user.uid).get();
     if (!requesterDoc.exists || requesterDoc.data()?.role !== "admin") {
       res.status(403).json({ error: "Only Admins can create new staff accounts." });
       return;
     }
 
-    const { email, password, displayName, role } = req.body;
+    const { email, password, displayName, role, assignedBusId } = req.body; // <-- ADDED assignedBusId
 
     if (!email || !password) {
        res.status(400).json({ error: "Email and password are required." });
        return;
     }
 
-    // Only allow admin or operator roles
     const assignedRole = (role === "admin" || role === "operator") ? role : "operator";
 
     const userRecord = await adminAuth.createUser({
@@ -84,6 +82,7 @@ router.post("/register-staff", requireAuth, async (req: AuthRequest, res: Respon
       email: email,
       displayName: displayName || "New Staff",
       role: assignedRole,
+      assignedBusId: assignedBusId || "", // <-- SAVED HERE
       createdAt: new Date().toISOString(),
     });
 
