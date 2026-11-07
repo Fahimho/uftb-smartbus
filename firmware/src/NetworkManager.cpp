@@ -6,26 +6,21 @@ NetworkManager::NetworkManager(const char* ssid, const char* password, const cha
     this->password = password;
     this->backendUrl = backendUrl;
     this->mqttServer = mqttServer;
+    this->_busId = "UNASSIGNED"; // Default
+}
+
+// NEW: Set the dynamic Bus ID
+void NetworkManager::setBusId(String busId) {
+    this->_busId = busId;
 }
 
 void NetworkManager::begin() {
-    Serial.print("[WiFi] Connecting to ");
-    Serial.println(ssid);
-    WiFi.begin(ssid, password);
-    
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-    Serial.println();
-    
+    // WiFiManager handles the connection, so we just check status
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.print("[WiFi] Connected! IP: ");
+        Serial.print("[WiFi] Already Connected! IP: ");
         Serial.println(WiFi.localIP());
     } else {
-        Serial.println("[WiFi] Connection failed.");
+        Serial.println("[WiFi] Not connected. WiFiManager should handle this.");
     }
 }
 
@@ -39,17 +34,19 @@ void NetworkManager::connectMQTT() {
     String clientId = "BusESP32-";
     clientId += String(random(0xffff), HEX);
     
-    Serial.println("[MQTT] Attempting connection...");
+    Serial.println("[MQTT] Attempting connection as " + _busId + "...");
     
     if (mqttClient.connect(clientId.c_str(), "SMART-BUS", "uftbsmartbus@")) {
         Serial.println("[MQTT] Connected to EMQX Cloud!");
-        mqttClient.subscribe("smartbus/BUS-01/request");
-        mqttClient.subscribe("smartbus/BUS-01/camera");
-        mqttClient.subscribe("smartbus/BUS-01/audio");
-        mqttClient.subscribe("smartbus/BUS-01/commands");
-         mqttClient.subscribe("smartbus/BUS-01/contacts"); // <-- ADD THIS
+        
+        // DYNAMIC SUBSCRIPTIONS based on _busId
+        mqttClient.subscribe(("smartbus/" + _busId + "/request").c_str());
+        mqttClient.subscribe(("smartbus/" + _busId + "/camera").c_str());
+        mqttClient.subscribe(("smartbus/" + _busId + "/audio").c_str());
+        mqttClient.subscribe(("smartbus/" + _busId + "/commands").c_str());
+        mqttClient.subscribe(("smartbus/" + _busId + "/contacts").c_str());
 
-        Serial.println("[MQTT] Subscribed to request, camera, audio, and commands topics");
+        Serial.println("[MQTT] Subscribed to topics for " + _busId);
     } else {
         Serial.print("[MQTT] Failed, rc=");
         Serial.println(mqttClient.state());
@@ -78,15 +75,18 @@ void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
         }
         String t = String(topic);
         
-        if (t.indexOf("request") > 0 && onMessage) {
+        // DYNAMIC TOPIC CHECK based on _busId
+        String prefix = "smartbus/" + _busId + "/";
+        
+        if (t.indexOf(prefix + "request") >= 0 && onMessage) {
             onMessage(message);
-        } else if (t.indexOf("camera") > 0 && onCamera) {
+        } else if (t.indexOf(prefix + "camera") >= 0 && onCamera) {
             onCamera(message);
-        } else if (t.indexOf("audio") > 0 && onAudio) {
+        } else if (t.indexOf(prefix + "audio") >= 0 && onAudio) {
             onAudio(message);
-        } else if (t.indexOf("commands") > 0 && onAdminCall) {
+        } else if (t.indexOf(prefix + "commands") >= 0 && onAdminCall) {
             onAdminCall(message);
-        }else if (t.indexOf("contacts") > 0 && onContactsUpdate) { // <-- ADD THIS
+        } else if (t.indexOf(prefix + "contacts") >= 0 && onContactsUpdate) {
             onContactsUpdate(message);
         }
     });
@@ -126,22 +126,58 @@ bool NetworkManager::postGPS(String busId, double lat, double lng, double speed,
     String url = String(backendUrl) + "/api/trips/gps";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
-    String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + ",\"speed\":" + String(speed, 1) + ",\"status\":\"" + status + "\"}";
+    
+    // NEW: Get the IP address
+    String ipStr = WiFi.localIP().toString(); 
+    
+    // NEW: Add ip to the payload
+    String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + ",\"speed\":" + String(speed, 1) + ",\"status\":\"" + status + "\",\"ip\":\"" + ipStr + "\"}";
+    
     int httpResponseCode = http.POST(payload);
     http.end();
     return (httpResponseCode == 200);
 }
 
-bool NetworkManager::postEmergency(String busId, double lat, double lng) {
-    if (!isConnected()) return false;
+String NetworkManager::postEmergency(String busId, double lat, double lng) {
+    if (!isConnected()) return "";
     HTTPClient http;
-    String url = String(backendUrl) + "/api/trips/emergency";
+    String url = String(backendUrl) + "/api/emergency/alert"; 
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
+    
     String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + "}";
     int httpResponseCode = http.POST(payload);
+    
+    String eventId = "";
+    if (httpResponseCode == 201) {
+        String response = http.getString();
+        int idStart = response.indexOf("\"eventId\":\"");
+        if (idStart > 0) {
+            idStart += 11; 
+            int idEnd = response.indexOf("\"", idStart);
+            eventId = response.substring(idStart, idEnd);
+            Serial.println("[HTTP] Extracted eventId: " + eventId);
+        }
+    }
+    
     http.end();
-    return (httpResponseCode == 201);
+    return eventId;
+}
+
+bool NetworkManager::postAlertStatus(String eventId, String status) {
+    if (!isConnected() || eventId == "") return false;
+    
+    HTTPClient http;
+    String url = String(backendUrl) + "/api/emergency/alert-status";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    
+    String payload = "{\"eventId\":\"" + eventId + "\",\"status\":\"" + status + "\"}";
+    int httpResponseCode = http.POST(payload);
+    http.end();
+    
+    Serial.printf("[WEBHOOK] Status '%s' sent for event %s. Code: %d\n", status.c_str(), eventId.c_str(), httpResponseCode);
+    return (httpResponseCode == 200);
 }
 
 bool NetworkManager::uploadPhoto(String requestId, String base64Image) {

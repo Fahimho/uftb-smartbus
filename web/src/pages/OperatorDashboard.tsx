@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { getFirestore, collection, onSnapshot, query, where, doc, updateDoc } from "firebase/firestore";
+import { getFirestore, collection, onSnapshot, query, where, doc, updateDoc, getDoc } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { useAuth } from "../context/AuthContext";
 import { Bell, X } from "lucide-react";
@@ -26,21 +26,59 @@ export default function OperatorDashboard() {
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
   const [viewingTripEvents, setViewingTripEvents] = useState<any[]>([]);
 
-  const BUS_ID = "BUS-01";
+  // Store Operator's bus details
+  const [operatorBus, setOperatorBus] = useState<{busId: string, busName: string} | null>(null);
+  const [loadingBus, setLoadingBus] = useState(true);
+
+  // 0. Fetch Operator's assigned bus on load
+  useEffect(() => {
+    if (!user) return;
+    
+    const fetchOperatorBus = async () => {
+      try {
+        const userDoc = await getDoc(doc(db, "users", user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const assignedBusId = userData.assignedBusId;
+          
+          if (assignedBusId) {
+            const busDoc = await getDoc(doc(db, "buses", assignedBusId));
+            if (busDoc.exists()) {
+              setOperatorBus({ 
+                busId: assignedBusId, 
+                busName: busDoc.data().busName || assignedBusId 
+              });
+            } else {
+              setOperatorBus({ busId: assignedBusId, busName: assignedBusId });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load bus details", err);
+      } finally {
+        setLoadingBus(false);
+      }
+    };
+    
+    fetchOperatorBus();
+  }, [user]);
 
   // 1. Listen to ALL trips for history
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, "trips"), (snapshot) => {
+    if (!operatorBus) return;
+    const q = query(collection(db, "trips"), where("busId", "==", operatorBus.busId));
+    const unsub = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a: any, b: any) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
       setAllTrips(list);
     });
     return () => unsub();
-  }, []);
+  }, [operatorBus]);
 
   // 2. Listen to active trip status
   useEffect(() => {
-    const q = query(collection(db, "trips"), where("busId", "==", BUS_ID), where("status", "==", "IN_PROGRESS"));
+    if (!operatorBus) return;
+    const q = query(collection(db, "trips"), where("busId", "==", operatorBus.busId), where("status", "==", "IN_PROGRESS"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       if (!snapshot.empty) {
         setTripActive(true);
@@ -51,7 +89,7 @@ export default function OperatorDashboard() {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [operatorBus]);
 
   // 3. Listen to attendance events for the ACTIVE trip
   useEffect(() => {
@@ -68,9 +106,10 @@ export default function OperatorDashboard() {
     return () => unsubscribe();
   }, [activeTripId]);
 
-  // 4. Listen for Student Requests, Save to History, and Auto-Dismiss Popup
+  // 4. Listen for Student Requests
   useEffect(() => {
-    const q = query(collection(db, "busRequests"), where("busId", "==", BUS_ID));
+    if (!operatorBus) return;
+    const q = query(collection(db, "busRequests"), where("busId", "==", operatorBus.busId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -89,7 +128,7 @@ export default function OperatorDashboard() {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [operatorBus]);
 
   const handleViewTrip = (tripId: string) => {
     setViewingTripId(tripId);
@@ -103,19 +142,23 @@ export default function OperatorDashboard() {
   };
 
   const handleToggleTrip = async () => {
+    if (!operatorBus) return;
     const loadingToast = toast.loading(tripActive ? "Ending trip..." : "Starting trip...");
     try {
       if (tripActive) {
-        await fetch("http://localhost:5000/api/trips/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID }) });
+        await fetch("http://localhost:5000/api/trips/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: operatorBus.busId }) });
         toast.success("Trip Ended. GPS trail cleared.", { id: loadingToast });
       } else {
-        await fetch("http://localhost:5000/api/trips/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: BUS_ID, operatorUid: user?.uid }) });
+        await fetch("http://localhost:5000/api/trips/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: operatorBus.busId, operatorUid: user?.uid }) });
         toast.success("Trip Started!", { id: loadingToast });
       }
     } catch (err) {
       toast.error("Failed to update trip status.", { id: loadingToast });
     }
   };
+
+  if (loadingBus) return <Layout activeTab={activeTab} setActiveTab={setActiveTab}><p>Loading bus assignment...</p></Layout>;
+  if (!operatorBus) return <Layout activeTab={activeTab} setActiveTab={setActiveTab}><p style={{color: "red"}}>Error: You are not assigned to any bus. Contact Admin.</p></Layout>;
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -138,7 +181,7 @@ export default function OperatorDashboard() {
         <div>
           <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)", marginBottom: 24 }}>
             <h2 style={{ marginTop: 0 }}>Operator Controls</h2>
-            <p>Bus Assignment: <strong>{BUS_ID}</strong></p>
+            <p>Bus Assignment: <strong>{operatorBus.busId} ({operatorBus.busName})</strong></p>
             
             <button 
               onClick={handleToggleTrip}
@@ -185,7 +228,8 @@ export default function OperatorDashboard() {
             )}
           </div>
           <h3>Live Map</h3>
-          <LiveMap userRole="operator" />
+          {/* NEW: Pass targetBusId */}
+          <LiveMap userRole="operator" targetBusId={operatorBus.busId} />
         </div>
       )}
 
@@ -308,7 +352,8 @@ export default function OperatorDashboard() {
       {activeTab === "map" && (
         <div>
           <h3 style={{ marginTop: 0 }}>Live Bus Location</h3>
-          <LiveMap userRole="operator" />
+          {/* NEW: Pass targetBusId */}
+          <LiveMap userRole="operator" targetBusId={operatorBus.busId} />
         </div>
       )}
     </Layout>

@@ -7,7 +7,75 @@ import { getStorage } from "firebase-admin/storage";
 const router = Router();
 const db = getFirestore();
 
-// 1. Start a Trip
+// ==========================================
+// 1. Fleet Setup (Driver & Helper)
+// ==========================================
+router.post("/setup", async (req: Request, res: Response) => {
+  try {
+    const { busId, busName, route, driverName, driverPhone, helperName, helperPhone, emergencyContacts } = req.body;
+
+    if (!busId) {
+      res.status(400).json({ error: "Missing busId" });
+      return;
+    }
+
+    await db.collection("buses").doc(busId).set({
+      busId,
+      busName: busName || "",
+      route: route || "",
+      driverName: driverName || "",
+      driverPhone: driverPhone || "",
+      helperName: helperName || "",
+      helperPhone: helperPhone || "",
+      emergencyContacts: emergencyContacts || [],
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    if (emergencyContacts && Array.isArray(emergencyContacts)) {
+      const topic = `smartbus/${busId}/contacts`;
+      const payload = JSON.stringify({ numbers: emergencyContacts });
+      mqttClient.publish(topic, payload);
+    }
+
+    res.json({ message: "Fleet setup saved successfully" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// 2. Get Fleet Setup for a single bus
+// ==========================================
+router.get("/setup/:busId", async (req: Request, res: Response) => {
+  try {
+    const busId = req.params.busId as string; // <-- FIXED TYPESCRIPT ERROR
+    const doc = await db.collection("buses").doc(busId).get();
+    if (!doc.exists) {
+      res.json({ message: "Bus not configured yet" });
+      return;
+    }
+    res.json(doc.data());
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// NEW: 3. Get ALL Buses
+// ==========================================
+router.get("/buses", async (req: Request, res: Response) => {
+  try {
+    const snapshot = await db.collection("buses").get();
+    const buses = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(buses);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// 4. Start a Trip
+// ==========================================
 router.post("/start", async (req: Request, res: Response) => {
   try {
     const { busId, operatorUid } = req.body;
@@ -43,7 +111,9 @@ router.post("/start", async (req: Request, res: Response) => {
   }
 });
 
-// 2. End a Trip
+// ==========================================
+// 5. End a Trip
+// ==========================================
 router.post("/end", async (req: Request, res: Response) => {
   try {
     const { busId } = req.body;
@@ -71,7 +141,9 @@ router.post("/end", async (req: Request, res: Response) => {
   }
 });
 
-// 3. Record Attendance
+// ==========================================
+// 6. Record Attendance
+// ==========================================
 router.post("/attendance", async (req: Request, res: Response) => {
   try {
     const { uid, type, busId, studentName } = req.body;
@@ -102,12 +174,16 @@ router.post("/attendance", async (req: Request, res: Response) => {
   }
 });
 
-// 4. GPS Endpoint
+// ==========================================
+// 7. GPS Endpoint (Updated with IP)
+// ==========================================
 router.post("/gps", async (req: Request, res: Response) => {
   try {
-    const { busId, lat, lng, speed, status } = req.body;
+    const { busId, lat, lng, speed, status, ip } = req.body; // <-- ADD ip
     await db.collection("buses").doc(busId).set({
       busId: busId,
+      lastIp: ip || "Unknown",            // <-- ADD THIS
+      lastIpUpdatedAt: new Date().toISOString(), // <-- ADD THIS
       lastLocation: {
         lat: Number(lat),
         lng: Number(lng),
@@ -130,7 +206,9 @@ router.post("/gps", async (req: Request, res: Response) => {
   }
 });
 
-// 5. Trigger Emergency
+// ==========================================
+// 8. Trigger Emergency
+// ==========================================
 router.post("/emergency", async (req: Request, res: Response) => {
   try {
     const { busId, lat, lng } = req.body;
@@ -145,7 +223,9 @@ router.post("/emergency", async (req: Request, res: Response) => {
   }
 });
 
-// 6. Get Active Emergencies
+// ==========================================
+// 9. Get Active Emergencies
+// ==========================================
 router.get("/emergency", async (req: Request, res: Response) => {
   try {
     const snapshot = await db.collection("emergencyEvents").where("status", "==", "ACTIVE").orderBy("timestamp", "desc").get();
@@ -156,7 +236,9 @@ router.get("/emergency", async (req: Request, res: Response) => {
   }
 });
 
-// 7. Resolve Emergency
+// ==========================================
+// 10. Resolve Emergency
+// ==========================================
 router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -169,7 +251,9 @@ router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
   }
 });
 
-// 8. Student Request (Publishes to MQTT) - NOW SAVES UID
+// ==========================================
+// 11. Student Request (Publishes to MQTT)
+// ==========================================
 router.post("/request", async (req: Request, res: Response) => {
   try {
     const { busId, message, studentName, lat, lng, studentUid } = req.body;
@@ -183,7 +267,7 @@ router.post("/request", async (req: Request, res: Response) => {
       busId, 
       message, 
       studentName: studentName || "Unknown Student",
-      studentUid: studentUid || "unknown", // <-- SAVED HERE FOR THE MAP
+      studentUid: studentUid || "unknown",
       status: "PENDING", 
       timestamp: new Date().toISOString() 
     };
@@ -204,10 +288,12 @@ router.post("/request", async (req: Request, res: Response) => {
   }
 });
 
-// 9. ESP32 Fetches Pending Requests (Fallback)
+// ==========================================
+// 12. ESP32 Fetches Pending Requests
+// ==========================================
 router.get("/request/:busId", async (req: Request, res: Response) => {
   try {
-    const { busId } = req.params;
+    const busId = req.params.busId as string;
     const snapshot = await db.collection("busRequests").where("busId", "==", busId).where("status", "==", "PENDING").get();
       
     if (snapshot.empty) {
@@ -225,7 +311,9 @@ router.get("/request/:busId", async (req: Request, res: Response) => {
   }
 });
 
-// 10. Admin Requests Photo
+// ==========================================
+// 13. Admin Requests Photo
+// ==========================================
 router.post("/photo/request", async (req: Request, res: Response) => {
   try {
     const { busId } = req.body;
@@ -243,7 +331,9 @@ router.post("/photo/request", async (req: Request, res: Response) => {
   }
 });
 
-// 11. ESP32 Uploads Photo
+// ==========================================
+// 14. ESP32 Uploads Photo
+// ==========================================
 router.post("/photo/upload", async (req: Request, res: Response) => {
   try {
     const { requestId, imageBase64 } = req.body;
@@ -264,7 +354,9 @@ router.post("/photo/upload", async (req: Request, res: Response) => {
   }
 });
 
-// 12. Admin Sends Voice Message
+// ==========================================
+// 15. Admin Sends Voice Message
+// ==========================================
 router.post("/audio/send", async (req: Request, res: Response) => {
   try {
     const { busId, audioBase64 } = req.body;
@@ -285,7 +377,9 @@ router.post("/audio/send", async (req: Request, res: Response) => {
   }
 });
 
-// 13. Bus Uploads Audio to Admin
+// ==========================================
+// 16. Bus Uploads Audio to Admin
+// ==========================================
 router.post("/audio/upload", async (req: Request, res: Response) => {
   try {
     const { busId, audioBase64 } = req.body;

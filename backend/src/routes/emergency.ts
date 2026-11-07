@@ -46,7 +46,8 @@ router.post("/alert", async (req, res) => {
     const { busId, lat, lng } = req.body;
     
     try {
-        await db.collection("emergencyEvents").add({
+        // CHANGED: Capture the document reference so we can send the ID back
+        const docRef = await db.collection("emergencyEvents").add({
             busId,
             lat: parseFloat(lat),
             lng: parseFloat(lng),
@@ -54,7 +55,9 @@ router.post("/alert", async (req, res) => {
             status: "ACTIVE",
             deliveryState: "modem_accepted"
         });
-        res.status(201).json({ status: "Alert saved" });
+        
+        // Return the eventId to the ESP32
+        res.status(201).json({ status: "Alert saved", eventId: docRef.id });
     } catch (error) {
         res.status(500).json({ error: "Failed to save alert" });
     }
@@ -72,6 +75,25 @@ router.post("/call-bus", async (req, res) => {
         if (err) return res.status(500).json({ error: "MQTT failed" });
         res.json({ status: "Command sent" });
     });
+});
+
+// 5. NEW: Webhook for ESP32 to report SMS/Call status
+router.post("/alert-status", async (req, res) => {
+    const { eventId, status } = req.body;
+    
+    if (!eventId || !status) {
+        return res.status(400).json({ error: "Missing eventId or status" });
+    }
+
+    try {
+        await db.collection("emergencyEvents").doc(eventId).update({
+            deliveryState: status
+        });
+        res.json({ status: "Delivery state updated successfully" });
+    } catch (error) {
+        console.error("Webhook update failed:", error);
+        res.status(500).json({ error: "Failed to update delivery state" });
+    }
 });
 
 export default router;

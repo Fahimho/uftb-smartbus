@@ -3,6 +3,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <SPI.h>
+#include <Preferences.h>
+#include <WiFiManager.h>
+#include <ArduinoOTA.h>
 #include "ResourceManager.h"
 #include "RFIDManager.h"
 #include "SDManager.h"
@@ -21,11 +24,12 @@
 #define GSM_TX 2
 
 // --- WIFI & BACKEND CONFIGURATION ---
-const char* WIFI_SSID = "Fahim Jisan";       
-const char* WIFI_PASS = "fj@174712";  
 const char* BACKEND_URL = "http://192.168.0.102:5000"; 
 const char* MQTT_SERVER = "nf9aa1f2.ala.asia-southeast1.emqxsl.com"; 
-const String BUS_ID = "BUS-01";
+
+// --- DYNAMIC BUS ID ---
+String BUS_ID = "UNASSIGNED";
+Preferences preferences;
 
 // --- HARDWARE OBJECTS ---
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -33,7 +37,7 @@ ResourceManager resMgr;
 RFIDManager rfid(UINT8_MAX, resMgr);
 SDManager sd(SD_CS, resMgr);
 InputManager inputs(I2C_SDA, I2C_SCL);
-NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL, MQTT_SERVER);
+NetworkManager net("", "", BACKEND_URL, MQTT_SERVER); 
 GPSManager gps(GPS_RX, -1);
 CameraManager camera;
 Sim800Manager gsm(GSM_RX, GSM_TX);
@@ -73,6 +77,90 @@ void setup() {
     Serial.println("UFTB SmartBus - FULL SYSTEM");
     Serial.println("========================================");
 
+    // 1. Load Bus ID from memory
+    preferences.begin("smartbus", false);
+    BUS_ID = preferences.getString("busId", "");
+
+    // 2. If no Bus ID is saved, start the Captive Portal
+    if (BUS_ID == "") {
+        Serial.println("[SETUP] No Bus ID found. Starting Captive Portal...");
+        
+        WiFiManager wifiManager;
+        wifiManager.setConfigPortalTimeout(300); 
+        wifiManager.startConfigPortal("SmartBus-Setup");
+
+        WiFiServer server(80);
+        server.begin();
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("SETUP MODE");
+            display.println("Wi-Fi Connected.");
+            display.println("Open Browser to:");
+            display.println(WiFi.localIP());
+            display.display();
+        }
+
+        Serial.println("========================================");
+        Serial.println("Wi-Fi Connected!");
+        Serial.print("Open this IP in your browser: ");
+        Serial.println(WiFi.localIP());
+        Serial.println("========================================");
+
+        bool configured = false;
+        while (!configured) {
+            WiFiClient client = server.available();
+            if (client) {
+                String request = client.readStringUntil('\r');
+                if (request.indexOf("/save") != -1) {
+                    int idIndex = request.indexOf("busId=");
+                    if (idIndex != -1) {
+                        String rawId = request.substring(idIndex + 6, request.indexOf(" ", idIndex));
+                        
+                        rawId.trim();
+                        rawId.toUpperCase(); 
+                        rawId.replace("BUS-", "");
+                        rawId.replace("BUS", "");
+                        int busNum = rawId.toInt();
+                        char formattedId[10];
+                        sprintf(formattedId, "BUS-%02d", busNum);
+                        String newId = String(formattedId);
+
+                        preferences.putString("busId", newId);
+                        BUS_ID = newId;
+                        configured = true;
+                        
+                        client.println("HTTP/1.1 200 OK");
+                        client.println("Content-Type: text/html");
+                        client.println("Connection: close");
+                        client.println();
+                        client.println("<h1>Success! Bus ID set to " + newId + ". Rebooting...</h1>");
+                        client.stop();
+                        delay(2000);
+                        ESP.restart();
+                    }
+                } else {
+                    client.println("HTTP/1.1 200 OK");
+                    client.println("Content-Type: text/html");
+                    client.println("Connection: close");
+                    client.println();
+                    client.println("<html><body>");
+                    client.println("<h2>SmartBus Setup</h2>");
+                    client.println("<p>Enter the Bus Number (e.g. 1, 2, 15)</p>");
+                    client.println("<form action='/save'>");
+                    client.println("Bus ID: <input type='text' name='busId' placeholder='1' required><br><br>");
+                    client.println("<input type='submit' value='Save & Reboot'>");
+                    client.println("</form></body></html>");
+                    client.stop();
+                }
+            }
+            delay(10);
+        }
+    }
+
+    Serial.println("[SETUP] Operating as: " + BUS_ID);
+
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(100000); 
     
@@ -90,7 +178,7 @@ void setup() {
         display.setTextColor(SSD1306_WHITE);
         display.setTextSize(1);
         display.setCursor(0, 0);
-        display.println("BUS-01 ONLINE");
+        display.println(BUS_ID + " ONLINE");
         display.display();
         Serial.println("[OK] OLED Display found.");
     }
@@ -108,9 +196,31 @@ void setup() {
 
     gsm.begin(); 
     
+    net.setBusId(BUS_ID);
     net.begin();
     
-    // 1. Student Request Callback
+    // --- OTA Setup ---
+    ArduinoOTA.setHostname(BUS_ID.c_str()); 
+    ArduinoOTA.setPassword("uftbsmartbus"); 
+    
+    ArduinoOTA.onStart([]() {
+        Serial.println("[OTA] Update Starting...");
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] Update Complete. Rebooting...");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("[OTA] Error[%u]: ", error);
+    });
+    
+    ArduinoOTA.begin();
+    Serial.println("[OTA] Ready. Hostname: " + BUS_ID + ".local");
+    // -----------------------
+
+    // Callbacks
     net.setMessageCallback([](String payload) {
         Serial.println("[MQTT RECEIVED] " + payload);
         int start = payload.indexOf(":") + 2;
@@ -119,7 +229,6 @@ void setup() {
         hasNewMqttRequest = true;
     });
 
-    // 2. Camera Request Callback
     net.setCameraCallback([](String payload) {
         int start = payload.indexOf(":") + 2;
         int end = payload.indexOf("\"", start);
@@ -127,13 +236,11 @@ void setup() {
         hasCameraRequest = true;
     });
     
-    // 3. Audio Request Callback
     net.setAudioCallback([](String payload) {
         Serial.println("[MQTT AUDIO] " + payload);
         hasAudioRequest = true;
     });
 
-    // 4. Admin Call Callback
     net.setAdminCallCallback([](String payload) {
         Serial.println("[MQTT ADMIN CALL] " + payload);
         int start = payload.indexOf(":") + 2;
@@ -142,10 +249,8 @@ void setup() {
         hasAdminCallRequest = true;
     });
 
-    // 5. Contacts Update Callback (NEW)
     net.setContactsUpdateCallback([](String payload) {
         Serial.println("[MQTT CONTACTS] " + payload);
-        // Payload looks like: {"numbers":["+88017...","+88018..."]}
         int start = payload.indexOf("[") + 1;
         int end = payload.indexOf("]");
         String list = payload.substring(start, end);
@@ -171,6 +276,8 @@ void setup() {
 }
 
 void loop() {
+    ArduinoOTA.handle(); // Check for OTA updates
+
     // 1. Camera Request
     if (hasCameraRequest) {
         hasCameraRequest = false;
@@ -205,7 +312,7 @@ void loop() {
             display.display();
             delay(3000);
             display.clearDisplay();
-            display.println("BUS-01 ONLINE");
+            display.println(BUS_ID + " ONLINE");
             display.display();
         }
     }
@@ -242,7 +349,7 @@ void loop() {
             
             display.clearDisplay();
             display.setCursor(0, 0);
-            display.println("BUS-01 ONLINE");
+            display.println(BUS_ID + " ONLINE");
             display.display();
         }
     }
@@ -264,7 +371,7 @@ void loop() {
         if (oledOk) {
             display.clearDisplay();
             display.setCursor(0, 0);
-            display.println("BUS-01 ONLINE");
+            display.println(BUS_ID + " ONLINE");
             display.display();
         }
     }
@@ -290,7 +397,7 @@ void loop() {
         }
     }
     
-    // 6. Emergency Button (3-Second Hold)
+    // 6. Emergency Button
     if (inputs.isEmergencyPressed()) {
         if (!emergencyHoldActive) {
             emergencyHoldActive = true;
@@ -311,17 +418,19 @@ void loop() {
                 display.display();
             }
             
-            // Get real GPS
             gps.update();
             String latStr = gps.hasFix() ? String(gps.getLat(), 6) : "0.0";
             String lngStr = gps.hasFix() ? String(gps.getLng(), 6) : "0.0";
             
-            // 1. Send SMS to all, Call primary
+            String eventId = "";
+            if (net.isConnected()) {
+                eventId = net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
+            }
+            
             gsm.triggerEmergency(BUS_ID, latStr, lngStr);
             
-            // 2. POST alert to backend so dashboard pops up
-            if (net.isConnected()) {
-                net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
+            if (eventId != "") {
+                net.postAlertStatus(eventId, "delivered");
             }
         }
     } 
@@ -364,7 +473,7 @@ void loop() {
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
-        Serial.printf("[Status] WiFi: %s | OLED: %d\n", net.getStatus().c_str(), oledOk);
+        Serial.printf("[Status] %s | WiFi: %s | OLED: %d\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk);
     }
     
     delay(50);

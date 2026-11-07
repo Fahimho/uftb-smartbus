@@ -40,9 +40,11 @@ function CustomZoomControls() {
   );
 }
 
-export default function LiveMap({ userRole = "operator" }: { userRole?: string }) {
+// NEW: Accept targetBusId prop
+export default function LiveMap({ userRole = "operator", targetBusId = "BUS-01" }: { userRole?: string, targetBusId?: string }) {
   const { user } = useAuth();
   const [busData, setBusData] = useState<any>(null);
+  const [busName, setBusName] = useState<string>("");
   const [history, setHistory] = useState<[number, number][]>([]);
   const [requests, setRequests] = useState<any[]>([]);
   const [attendance, setAttendance] = useState<any[]>([]); 
@@ -50,9 +52,7 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
   const [isStale, setIsStale] = useState(false);
   const [checking, setChecking] = useState(true); 
 
-  // FIXED: Define isOperator early so we can use it in the useEffect hooks
   const isOperator = userRole === "operator" || userRole === "admin";
-
   const defaultCenter: [number, number] = [24.065111, 90.222806];
 
   const busIcon = new L.DivIcon({
@@ -69,9 +69,24 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
     iconAnchor: [10, 10]
   });
 
+  // 0. Fetch bus name whenever targetBusId changes
+  useEffect(() => {
+    if (!targetBusId) return;
+    const unsub = onSnapshot(doc(db, "buses", targetBusId), (docSnap) => {
+      if (docSnap.exists()) {
+        setBusName(docSnap.data().busName || targetBusId);
+      } else {
+        setBusName(targetBusId);
+      }
+    });
+    return () => unsub();
+  }, [targetBusId]);
+
   // 1. Listen to Bus Location
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "buses", "BUS-01"), (docSnap) => {
+    if (!targetBusId) return;
+    setLoading(true);
+    const unsub = onSnapshot(doc(db, "buses", targetBusId), (docSnap) => {
       if (docSnap.exists() && docSnap.data().lastLocation) {
         const data = docSnap.data().lastLocation;
         setBusData(data);
@@ -85,11 +100,12 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
       setLoading(false);
     });
     return () => unsub();
-  }, []);
+  }, [targetBusId]);
 
   // 2. Listen to GPS History
   useEffect(() => {
-    const q = query(collection(db, "gpsHistory"), where("busId", "==", "BUS-01"));
+    if (!targetBusId) return;
+    const q = query(collection(db, "gpsHistory"), where("busId", "==", targetBusId));
     const unsub = onSnapshot(q, (snapshot) => {
       const docs = snapshot.docs.map(doc => doc.data());
       docs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -97,34 +113,34 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
       setHistory(points);
     });
     return () => unsub();
-  }, []);
+  }, [targetBusId]);
 
   // 3. Listen to Student Requests
   useEffect(() => {
-    const q = query(collection(db, "busRequests"), where("busId", "==", "BUS-01"));
+    if (!targetBusId) return;
+    const q = query(collection(db, "busRequests"), where("busId", "==", targetBusId));
     const unsub = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(d => d.data())
         .filter(r => r.lat !== undefined && r.lng !== undefined);
       setRequests(list);
     });
     return () => unsub();
-  }, []);
+  }, [targetBusId]);
 
   // 4. Listen to Attendance
-  // FIXED: Only operators are allowed to query this. Students skip it to prevent permission errors.
   useEffect(() => {
-    if (!isOperator) {
-      setAttendance([]); // Clear attendance for students
+    if (!isOperator || !targetBusId) {
+      setAttendance([]); 
       return;
     }
 
-    const q = query(collection(db, "tripAttendance"), where("busId", "==", "BUS-01"));
+    const q = query(collection(db, "tripAttendance"), where("busId", "==", targetBusId));
     const unsub = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map(d => d.data());
       setAttendance(list);
     });
     return () => unsub();
-  }, [isOperator]); // Add isOperator to dependency array
+  }, [isOperator, targetBusId]);
 
   // 5. Stale data checker
   useEffect(() => {
@@ -154,28 +170,22 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
       
-      {/* STICKY BANNER - Sticks to top of scroll container */}
-      <div style={{ 
-        position: "sticky", 
-        top: 0, 
-        zIndex: 1000, 
-        background: "#f3f4f6", 
-        padding: "16px 32px", 
-      }}>
+      {/* STICKY BANNER */}
+      <div style={{ position: "sticky", top: 0, zIndex: 1000, background: "#f3f4f6", padding: "16px 32px" }}>
         {!busData && (
           <div style={{ background: "#fef3c7", padding: "16px", borderRadius: 8, textAlign: "center", fontWeight: "bold", color: "#b45309", border: "1px solid #f59e0b" }}>
-            ⚠️ Waiting for bus to send GPS data...
+            ⚠️ Waiting for {busName} ({targetBusId}) to send GPS data...
           </div>
         )}
         {busData && !isStale && !checking && (
           <div style={{ background: "#dcfce7", padding: "12px 24px", borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#166534", border: "1px solid #10b981" }}>
-            <span>🟢 BUS-01 is {busData.status}</span>
+            <span>🟢 {busName} ({targetBusId}) is {busData.status}</span>
             <span>Live: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
           </div>
         )}
         {busData && isStale && !checking && (
           <div style={{ background: "#fee2e2", padding: "12px 24px", borderRadius: 8, display: "flex", justifyContent: "space-between", fontWeight: "bold", color: "#991b1b", border: "1px solid #ef4444" }}>
-            <span>🔴 GPS OFFLINE - Last known location</span>
+            <span>🔴 {busName} ({targetBusId}) GPS OFFLINE - Last known location</span>
             <span>Last Seen: {new Date(busData.updatedAt).toLocaleTimeString()}</span>
           </div>
         )}
@@ -194,7 +204,7 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
             {busData && (
               <Marker position={center} icon={isOperator ? busIcon : DefaultIcon}>
                 <Popup>
-                  <strong>BUS-01</strong><br />
+                  <strong>{busName} ({targetBusId})</strong><br />
                   Status: {isStale ? "OFFLINE" : busData.status}<br />
                   Speed: {busData.speed} km/h
                 </Popup>
@@ -202,9 +212,7 @@ export default function LiveMap({ userRole = "operator" }: { userRole?: string }
             )}
 
             {requests.map((req, idx) => {
-              // FIXED: Check by UID if available, fallback to displayName
               const isSelf = req.studentId === user?.uid || req.studentName === user?.displayName;
-              
               const distanceNum = busData ? Number(calcDistance(busData.lat, busData.lng, req.lat, req.lng)) : 999;
               const busIsHere = distanceNum < 0.05 && busData?.speed < 2;
               const hasBoarded = attendance.some(

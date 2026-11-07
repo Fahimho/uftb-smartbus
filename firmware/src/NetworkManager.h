@@ -14,9 +14,14 @@ public:
     bool isConnected();
     String getStatus();
     
+    // ADD THESE TWO LINES:
+    void setBusId(String busId);
+    String getBusId() { return _busId; }
+
     bool postAttendance(String uid, String type, String busId);
     bool postGPS(String busId, double lat, double lng, double speed, String status);
-    bool postEmergency(String busId, double lat, double lng);
+    String postEmergency(String busId, double lat, double lng);
+    bool postAlertStatus(String eventId, String status);
     bool uploadPhoto(String requestId, String base64Image);
     
     void setMessageCallback(std::function<void(String)> callback);
@@ -31,6 +36,8 @@ private:
     const char* backendUrl;
     const char* mqttServer;
     
+    String _busId; // <-- ADD THIS LINE
+    
     WiFiClientSecure espClient; 
     PubSubClient mqttClient;
     
@@ -38,6 +45,7 @@ private:
     std::function<void(String)> onCamera;
     std::function<void(String)> onAudio; 
     std::function<void(String)> onAdminCall;
-    std::function<void(String)> onContactsUpdate; // <-- ADD New
+    std::function<void(String)> onContactsUpdate;
+    
     void connectMQTT();
 };

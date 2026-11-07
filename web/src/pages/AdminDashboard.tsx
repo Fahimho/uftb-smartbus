@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
-import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus } from "lucide-react";
-import { getFirestore, collection, onSnapshot, query, where } from "firebase/firestore";
+import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus, Trash2, Wifi } from "lucide-react";
+import { getFirestore, collection, onSnapshot, query, where, doc, deleteDoc } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
 import { connectStorageEmulator } from "firebase/storage";
@@ -30,7 +30,27 @@ export default function AdminDashboard() {
   const [allTrips, setAllTrips] = useState<any[]>([]);
   const [openMapFor, setOpenMapFor] = useState<string | null>(null);
   
-  // Emergency contacts state
+  // Buses State
+  const [allBuses, setAllBuses] = useState<any[]>([]);
+  const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
+  
+  // Map State
+  const [mapBusId, setMapBusId] = useState<string>("");
+  
+  // Camera State
+  const [cameraBusId, setCameraBusId] = useState<string>("");
+  
+  // Audio State
+  const [audioBusId, setAudioBusId] = useState<string>("");
+
+  // Fleet Setup Form State
+  const [busName, setBusName] = useState("");
+  const [busIp, setBusIp] = useState(""); // NEW
+  const [route, setRoute] = useState("");
+  const [driverName, setDriverName] = useState("");
+  const [driverPhone, setDriverPhone] = useState("");
+  const [helperName, setHelperName] = useState("");
+  const [helperPhone, setHelperPhone] = useState("");
   const [emergencyContacts, setEmergencyContacts] = useState<string[]>([]);
 
   // State for Admin viewing trip attendance
@@ -73,41 +93,112 @@ export default function AdminDashboard() {
     return () => unsub();
   }, []);
 
-  // 4. Load Emergency Contacts on Mount
-  useEffect(() => {
-    fetch("http://localhost:5000/api/emergency/contacts/BUS-01")
+  // 4. Fetch ALL Buses on mount
+  const fetchAllBuses = () => {
+    fetch("http://localhost:5000/api/trips/buses")
       .then(res => res.json())
       .then(data => {
-        if (data.numbers && data.numbers.length > 0) {
-          setEmergencyContacts(data.numbers);
+        setAllBuses(data);
+        if (data.length > 0 && !mapBusId) setMapBusId(data[0].busId);
+        if (data.length > 0 && !cameraBusId) setCameraBusId(data[0].busId);
+        if (data.length > 0 && !audioBusId) setAudioBusId(data[0].busId);
+      })
+      .catch(err => console.error(err));
+  };
+
+  useEffect(() => {
+    fetchAllBuses();
+  }, []);
+
+  // 5. Load Fleet Setup when selectedBusId changes
+  useEffect(() => {
+    if (!selectedBusId) return;
+    
+    fetch(`http://localhost:5000/api/trips/setup/${selectedBusId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.busId) {
+          setBusName(data.busName || "");
+          setBusIp(data.lastIp || "Waiting for connection..."); // <-- NEW
+          setRoute(data.route || "");
+          setDriverName(data.driverName || "");
+          setDriverPhone(data.driverPhone || "");
+          setHelperName(data.helperName || "");
+          setHelperPhone(data.helperPhone || "");
+          setEmergencyContacts(data.emergencyContacts || [""]);
         } else {
+          // If new bus
+          setBusName("");
+          setBusIp("Waiting for connection..."); // <-- NEW
+          setRoute("");
+          setDriverName("");
+          setDriverPhone("");
+          setHelperName("");
+          setHelperPhone("");
           setEmergencyContacts([""]);
         }
       })
       .catch(() => setEmergencyContacts([""]));
-  }, []);
+  }, [selectedBusId]);
 
-  // Save Emergency Contacts to Backend (and ESP32 via MQTT)
-  const saveContacts = async () => {
+  // Save Fleet Setup
+  const saveFleetSetup = async () => {
+    if (!selectedBusId) return toast.error("No bus selected");
     const filteredNumbers = emergencyContacts.filter(n => n.trim() !== "");
-    if (filteredNumbers.length === 0) {
-      toast.error("Please add at least one number");
-      return;
-    }
-    const loading = toast.loading("Saving contacts...");
+    
+    const loading = toast.loading("Saving bus setup...");
     try {
-      await fetch("http://localhost:5000/api/emergency/contacts", {
+      await fetch("http://localhost:5000/api/trips/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ busId: "BUS-01", numbers: filteredNumbers })
+        body: JSON.stringify({ 
+          busId: selectedBusId, 
+          busName, 
+          route, driverName, driverPhone, helperName, helperPhone, 
+          emergencyContacts: filteredNumbers 
+        })
       });
-      toast.success("Contacts saved and sent to bus!", { id: loading });
+      toast.success("Bus setup saved successfully!", { id: loading });
+      fetchAllBuses();
     } catch (err) {
-      toast.error("Failed to save contacts", { id: loading });
+      toast.error("Failed to save setup", { id: loading });
     }
   };
 
-  // 5. Handle View Trip Attendance
+  // Auto-generate Bus ID and create
+  const handleCreateNewBus = () => {
+    let highestNum = 0;
+    allBuses.forEach(b => {
+      const match = b.busId.match(/BUS-(\d+)/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > highestNum) highestNum = num;
+      }
+    });
+    
+    const nextNum = highestNum + 1;
+    const newId = `BUS-${String(nextNum).padStart(2, '0')}`;
+    
+    setSelectedBusId(newId);
+    toast.success(`Created new empty bus: ${newId}. Fill details and save.`);
+  };
+
+  // Delete a bus
+  const handleDeleteBus = async (busId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm(`Are you sure you want to delete ${busId}? This cannot be undone.`)) return;
+    
+    try {
+      await deleteDoc(doc(db, "buses", busId));
+      toast.success(`Deleted ${busId}`);
+      if (selectedBusId === busId) setSelectedBusId(null);
+      fetchAllBuses();
+    } catch (err) {
+      toast.error("Failed to delete bus");
+    }
+  };
+
+  // 6. Handle View Trip Attendance
   const handleViewTrip = (tripId: string) => {
     setViewingTripId(tripId);
     const q = query(collection(db, "tripAttendance"), where("tripId", "==", tripId));
@@ -121,6 +212,7 @@ export default function AdminDashboard() {
 
   // Audio recording functions
   const startRecording = async () => {
+    if (!audioBusId) return toast.error("No bus selected for audio");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -138,7 +230,7 @@ export default function AdminDashboard() {
             await fetch("http://localhost:5000/api/trips/audio/send", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ busId: "BUS-01", audioBase64: base64Audio })
+              body: JSON.stringify({ busId: audioBusId, audioBase64: base64Audio })
             });
             toast.success("Voice message sent to bus!", { id: loadingToast });
           } catch (err) {
@@ -162,6 +254,12 @@ export default function AdminDashboard() {
     }
   };
 
+  // Helper to get bus name
+  const getBusName = (busId: string) => {
+    const bus = allBuses.find(b => b.busId === busId);
+    return bus ? bus.busName || "Unnamed" : busId;
+  };
+
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
       
@@ -172,8 +270,8 @@ export default function AdminDashboard() {
         <div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 24, marginBottom: 32 }}>
             <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
-              <p style={{ margin: 0, color: "#64748b", fontSize: 14, fontWeight: 500 }}>Active Buses</p>
-              <h2 style={{ margin: "8px 0 0 0", fontSize: 32, color: "#0f172a" }}>1</h2>
+              <p style={{ margin: 0, color: "#64748b", fontSize: 14, fontWeight: 500 }}>Total Buses</p>
+              <h2 style={{ margin: "8px 0 0 0", fontSize: 32, color: "#0f172a" }}>{allBuses.length}</h2>
             </div>
             <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
               <p style={{ margin: 0, color: "#64748b", fontSize: 14, fontWeight: 500 }}>Total Scans Today</p>
@@ -215,7 +313,7 @@ export default function AdminDashboard() {
                       <td style={{ padding: "16px 24px" }}>
                         <span style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 8px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>{ev.type}</span>
                       </td>
-                      <td style={{ padding: "16px 24px" }}>{ev.busId}</td>
+                      <td style={{ padding: "16px 24px" }}>{getBusName(ev.busId)} ({ev.busId})</td>
                     </tr>
                   ))}
                 </tbody>
@@ -226,7 +324,7 @@ export default function AdminDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* TRIPS & ATTENDANCE TAB (WITH PASSENGER LIST) */}
+      {/* TRIPS & ATTENDANCE TAB */}
       {/* ========================================== */}
       {activeTab === "trips" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
@@ -239,6 +337,7 @@ export default function AdminDashboard() {
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10 }}>
               <thead>
                 <tr style={{ background: "#f8fafc", textAlign: "left", fontSize: 14, color: "#64748b" }}>
+                  <th style={{ padding: "16px 24px", fontWeight: 600 }}>Bus</th>
                   <th style={{ padding: "16px 24px", fontWeight: 600 }}>Trip ID</th>
                   <th style={{ padding: "16px 24px", fontWeight: 600 }}>Start Time</th>
                   <th style={{ padding: "16px 24px", fontWeight: 600 }}>End Time</th>
@@ -256,7 +355,8 @@ export default function AdminDashboard() {
                       background: viewingTripId === trip.id ? "#f0f9ff" : "transparent"
                     }}
                   >
-                    <td style={{ padding: "16px 24px", fontWeight: "bold", fontSize: 12 }}>{trip.id}</td>
+                    <td style={{ padding: "16px 24px", fontWeight: "bold" }}>{getBusName(trip.busId)} ({trip.busId})</td>
+                    <td style={{ padding: "16px 24px", fontSize: 12 }}>{trip.id}</td>
                     <td style={{ padding: "16px 24px", color: "#64748b" }}>{new Date(trip.startedAt).toLocaleString()}</td>
                     <td style={{ padding: "16px 24px", color: "#64748b" }}>{trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "--"}</td>
                     <td style={{ padding: "16px 24px" }}>
@@ -270,7 +370,6 @@ export default function AdminDashboard() {
             </table>
           )}
 
-          {/* ATTENDANCE DETAILS FOR SELECTED TRIP */}
           {viewingTripId && (
             <div style={{ marginTop: 32, padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -315,55 +414,6 @@ export default function AdminDashboard() {
       {/* ========================================== */}
       {activeTab === "emergency" && (
         <div>
-          {/* EMERGENCY CONTACTS SETUP */}
-          <div style={{ background: "white", padding: 24, borderRadius: 12, marginBottom: 24 }}>
-            <h3 style={{ marginTop: 0 }}>Emergency Contacts</h3>
-            <p style={{ color: "#64748b", fontSize: 14 }}>The ESP32 will send an SMS to these numbers and call the primary number when the emergency button is held.</p>
-            
-            {emergencyContacts.map((num, index) => (
-              <div key={index} style={{ display: "flex", gap: 12, marginBottom: 8 }}>
-                <input 
-                  type="text" 
-                  value={num} 
-                  onChange={(e) => {
-                    const newNums = [...emergencyContacts];
-                    newNums[index] = e.target.value;
-                    setEmergencyContacts(newNums);
-                  }}
-                  placeholder={index === 0 ? "Primary Number (+880...)" : `Optional Number ${index}`}
-                  style={{ padding: 8, border: "1px solid #cbd5e1", borderRadius: 6, flex: 1 }}
-                />
-                {index > 0 && (
-                  <button 
-                    onClick={() => {
-                      const newNums = emergencyContacts.filter((_, i) => i !== index);
-                      setEmergencyContacts(newNums);
-                    }}
-                    style={{ padding: "8px 12px", background: "#fee2e2", color: "#b91c1c", border: "none", borderRadius: 6, cursor: "pointer" }}
-                  >
-                    Remove
-                  </button>
-                )}
-              </div>
-            ))}
-            
-            <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-              <button 
-                onClick={() => setEmergencyContacts([...emergencyContacts, ""])}
-                style={{ padding: "8px 16px", background: "#e2e8f0", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
-              >
-                + Add Optional Number
-              </button>
-
-              <button 
-                onClick={saveContacts}
-                style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
-              >
-                Save Contacts
-              </button>
-            </div>
-          </div>
-
           <h3 style={{ marginTop: 0 }}>Active Emergencies</h3>
           {emergencies.length === 0 ? (
             <div style={{ background: "white", padding: 48, borderRadius: 12, textAlign: "center", color: "#64748b" }}>
@@ -371,70 +421,234 @@ export default function AdminDashboard() {
               <p>All buses are safe.</p>
             </div>
           ) : (
-            emergencies.map(em => (
-              <div key={em.id} style={{ background: "#fee2e2", border: "1px solid #ef4444", padding: 24, borderRadius: 12, marginBottom: 24 }}>
-                <h3 style={{ margin: 0, color: "#b91c1c", display: "flex", alignItems: "center", gap: 8 }}>
-                  <AlertTriangle /> EMERGENCY: {em.busId}
-                </h3>
-                <p style={{ margin: "8px 0" }}><strong>Time:</strong> {new Date(em.timestamp).toLocaleString()}</p>
+            emergencies.map(em => {
+              const busInfo = allBuses.find(b => b.busId === em.busId);
+              return (
+                <div key={em.id} style={{ background: "#fee2e2", border: "1px solid #ef4444", padding: 24, borderRadius: 12, marginBottom: 24 }}>
+                  <h3 style={{ margin: 0, color: "#b91c1c", display: "flex", alignItems: "center", gap: 8 }}>
+                    <AlertTriangle /> EMERGENCY: {getBusName(em.busId)} ({em.busId})
+                  </h3>
+                  <p style={{ margin: "8px 0" }}><strong>Time:</strong> {new Date(em.timestamp).toLocaleString()}</p>
+                  
+                  <div style={{ background: "white", padding: 12, borderRadius: 6, marginBottom: 16 }}>
+                    <p style={{ margin: 0, fontSize: 14, color: "#b91c1c" }}>
+                      <strong>Alert Delivery:</strong> {em.deliveryState === "delivered" ? "✅ SMS sent to all contacts and Call connected to Primary." : "Cellular notification is not configured or has not been verified."}
+                    </p>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <button 
+                      onClick={async () => {
+                        toast.loading("Resolving...");
+                        await fetch(`http://localhost:5000/api/trips/emergency/${em.id}/resolve`, { method: "POST" });
+                        toast.success("Emergency resolved");
+                        toast.dismiss();
+                      }}
+                      style={{ padding: "10px 20px", background: "#10b981", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
+                    >
+                      Acknowledge & Resolve
+                    </button>
+
+                    <button 
+                      onClick={async () => {
+                        if (!busInfo?.driverPhone) return toast.error("Driver number not set in Fleet Setup!");
+                        toast.loading("Calling Driver...");
+                        await fetch("http://localhost:5000/api/emergency/call-bus", { 
+                          method: "POST", 
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ busId: em.busId, phoneNumber: busInfo.driverPhone }) 
+                        });
+                        toast.success("Call command sent to Driver!", { id: "call" });
+                      }}
+                      style={{ padding: "10px 20px", background: "#f59e0b", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+                    >
+                      📞 Call Driver ({busInfo?.driverName || "Not Assigned"})
+                    </button>
+
+                    <button 
+                      onClick={async () => {
+                        if (!busInfo?.helperPhone) return toast.error("Helper number not set in Fleet Setup!");
+                        toast.loading("Calling Helper...");
+                        await fetch("http://localhost:5000/api/emergency/call-bus", { 
+                          method: "POST", 
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ busId: em.busId, phoneNumber: busInfo.helperPhone }) 
+                        });
+                        toast.success("Call command sent to Helper!", { id: "call" });
+                      }}
+                      style={{ padding: "10px 20px", background: "#f97316", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+                    >
+                      📞 Call Helper ({busInfo?.helperName || "Not Assigned"})
+                    </button>
+                    
+                    <button 
+                      onClick={() => setOpenMapFor(openMapFor === em.id ? null : em.id)}
+                      style={{ padding: "10px 20px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+                    >
+                      {openMapFor === em.id ? <><X size={18}/> Close Map</> : <><MapIcon size={18}/> View on Map</>}
+                    </button>
+                  </div>
+
+                  {openMapFor === em.id && em.lat !== 0 && em.lng !== 0 && (
+                    <div style={{ height: 300, marginTop: 16, borderRadius: 8, overflow: "hidden" }}>
+                      <MapContainer center={[em.lat, em.lng]} zoom={16} style={{ height: "100%", width: "100%" }}>
+                        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                        <Marker position={[em.lat, em.lng]}>
+                          <Popup>Emergency Location</Popup>
+                        </Marker>
+                      </MapContainer>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* MANAGE BUSES TAB */}
+      {/* ========================================== */}
+      {activeTab === "buses" && (
+        <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 24 }}>
+          
+          {/* Bus List Sidebar */}
+          <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>Buses</h3>
+              <button 
+                onClick={handleCreateNewBus} 
+                style={{ padding: "6px 12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", fontSize: 13 }}
+              >
+                + Add Bus
+              </button>
+            </div>
+            {allBuses.map(bus => (
+              <div 
+                key={bus.busId}
+                onClick={() => setSelectedBusId(bus.busId)}
+                style={{ 
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: 12, borderRadius: 6, marginBottom: 8, cursor: "pointer", 
+                  background: selectedBusId === bus.busId ? "#e2e8f0" : "transparent", 
+                  fontWeight: selectedBusId === bus.busId ? "bold" : "normal" 
+                }}
+              >
+                <span>{bus.busName || "Unnamed"} ({bus.busId})</span>
+                <Trash2 
+                  size={16} 
+                  onClick={(e) => handleDeleteBus(bus.busId, e)} 
+                  style={{ color: "#ef4444", cursor: "pointer" }} 
+                />
+              </div>
+            ))}
+            {allBuses.length === 0 && <p style={{ color: "#64748b", fontSize: 14 }}>No buses yet. Click + to add.</p>}
+          </div>
+
+          {/* Setup Form */}
+          <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
+            {!selectedBusId ? (
+              <div style={{ textAlign: "center", color: "#64748b", padding: 48 }}>
+                <Bus size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
+                <h2>Select a bus from the left to configure</h2>
+              </div>
+            ) : (
+              <>
+                <h2 style={{ marginTop: 0 }}>Setup: {selectedBusId}</h2>
                 
-                <div style={{ background: "white", padding: 12, borderRadius: 6, marginBottom: 16 }}>
-                  <p style={{ margin: 0, fontSize: 14, color: "#b91c1c" }}>
-                    <strong>Alert Delivery:</strong> Cellular notification is not configured or has not been verified.
-                  </p>
+                {/* NEW: Show IP Address */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, marginBottom: 24 }}>
+                  <Wifi size={20} color="#166534" />
+                  <div>
+                    <div style={{ fontSize: 12, color: "#166534", fontWeight: "bold" }}>DEVICE IP ADDRESS</div>
+                    <div style={{ fontSize: 16, fontWeight: "bold" }}>{busIp}</div>
+                  </div>
+                  {busIp !== "Waiting for connection..." && (
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(busIp);
+                        toast.success("IP copied to clipboard!");
+                      }}
+                      style={{ marginLeft: "auto", padding: "6px 12px", background: "#10b981", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "bold" }}
+                    >
+                      Copy
+                    </button>
+                  )}
                 </div>
 
-                <div style={{ display: "flex", gap: 12 }}>
-                  <button 
-                    onClick={async () => {
-                      toast.loading("Resolving...");
-                      await fetch(`http://localhost:5000/api/trips/emergency/${em.id}/resolve`, { method: "POST" });
-                      toast.success("Emergency resolved");
-                      toast.dismiss();
-                    }}
-                    style={{ padding: "10px 20px", background: "#10b981", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
-                  >
-                    Acknowledge & Resolve
-                  </button>
+                <div style={{ marginTop: 24, marginBottom: 24, padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                  <h3 style={{ marginTop: 0, color: "#0f172a" }}>Bus Identity & Route</h3>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <input placeholder="Bus Name (e.g. Padma)" value={busName} onChange={e => setBusName(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1", flex: 1, minWidth: 200 }} />
+                    <input placeholder="Route (e.g. Kaliakoir to Tongi)" value={route} onChange={e => setRoute(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1", flex: 2, minWidth: 200 }} />
+                  </div>
+                </div>
 
-                  <button 
-                    onClick={async () => {
-                      const primaryNum = emergencyContacts[0];
-                      if (!primaryNum) return toast.error("Set a primary number first!");
-                      toast.loading("Waking up SIM800L...");
-                      await fetch("http://localhost:5000/api/emergency/call-bus", { 
-                        method: "POST", 
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ busId: em.busId, phoneNumber: primaryNum }) 
-                      });
-                      toast.success("Call command sent to bus!", { id: "call" });
-                    }}
-                    style={{ padding: "10px 20px", background: "#f59e0b", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
-                  >
-                    📞 Call Bus
-                  </button>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+                  <div style={{ padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                    <h3 style={{ marginTop: 0, color: "#0f172a" }}>Bus Driver</h3>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <input placeholder="Driver Name" value={driverName} onChange={e => setDriverName(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} />
+                      <input placeholder="Driver Phone (+880...)" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} />
+                    </div>
+                  </div>
+
+                  <div style={{ padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                    <h3 style={{ marginTop: 0, color: "#0f172a" }}>Bus Helper</h3>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <input placeholder="Helper Name" value={helperName} onChange={e => setHelperName(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} />
+                      <input placeholder="Helper Phone (+880...)" value={helperPhone} onChange={e => setHelperPhone(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 24, padding: 24, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                  <h3 style={{ marginTop: 0, color: "#0f172a" }}>Emergency Contacts (Admin)</h3>
+                  <p style={{ color: "#64748b", fontSize: 14, marginBottom: 16 }}>When the emergency button is pressed, an SMS goes to ALL these numbers, and a call goes to the Primary number.</p>
+                  
+                  {emergencyContacts.map((num, index) => (
+                    <div key={index} style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+                      <input 
+                        type="text" 
+                        value={num} 
+                        onChange={(e) => {
+                          const newNums = [...emergencyContacts];
+                          newNums[index] = e.target.value;
+                          setEmergencyContacts(newNums);
+                        }}
+                        placeholder={index === 0 ? "Primary Emergency Number (+880...)" : `Optional Number ${index}`}
+                        style={{ padding: 10, border: "1px solid #cbd5e1", borderRadius: 6, flex: 1 }}
+                      />
+                      {index > 0 && (
+                        <button 
+                          onClick={() => setEmergencyContacts(emergencyContacts.filter((_, i) => i !== index))}
+                          style={{ padding: "8px 12px", background: "#fee2e2", color: "#b91c1c", border: "none", borderRadius: 6, cursor: "pointer" }}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
                   
                   <button 
-                    onClick={() => setOpenMapFor(openMapFor === em.id ? null : em.id)}
-                    style={{ padding: "10px 20px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+                    onClick={() => setEmergencyContacts([...emergencyContacts, ""])}
+                    style={{ marginTop: 8, padding: "8px 16px", background: "#e2e8f0", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
                   >
-                    {openMapFor === em.id ? <><X size={18}/> Close Map</> : <><MapIcon size={18}/> View on Map</>}
+                    + Add Optional Number
                   </button>
                 </div>
 
-                {openMapFor === em.id && em.lat !== 0 && em.lng !== 0 && (
-                  <div style={{ height: 300, marginTop: 16, borderRadius: 8, overflow: "hidden" }}>
-                    <MapContainer center={[em.lat, em.lng]} zoom={16} style={{ height: "100%", width: "100%" }}>
-                      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                      <Marker position={[em.lat, em.lng]}>
-                        <Popup>Emergency Location</Popup>
-                      </Marker>
-                    </MapContainer>
-                  </div>
-                )}
-              </div>
-            ))
-          )}
+                <div style={{ marginTop: 24, display: "flex", justifyContent: "flex-end" }}>
+                  <button 
+                    onClick={saveFleetSetup}
+                    style={{ padding: "12px 32px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", fontSize: 16 }}
+                  >
+                    Save Bus Setup
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -443,8 +657,17 @@ export default function AdminDashboard() {
       {/* ========================================== */}
       {activeTab === "map" && (
         <div style={{ padding: "32px 32px 0 32px" }}>
-          <h3 style={{ marginTop: 0 }}>Live Fleet Map</h3>
-          <LiveMap userRole="admin" />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Live Fleet Map</h3>
+            <select 
+              value={mapBusId} 
+              onChange={(e) => setMapBusId(e.target.value)}
+              style={{ padding: "8px 16px", borderRadius: 6, border: "1px solid #cbd5e1", fontWeight: "bold" }}
+            >
+              {allBuses.map(b => <option key={b.busId} value={b.busId}>{b.busName} ({b.busId})</option>)}
+            </select>
+          </div>
+          <LiveMap userRole="admin" targetBusId={mapBusId} />
         </div>
       )}
 
@@ -456,16 +679,27 @@ export default function AdminDashboard() {
           <h2 style={{ marginTop: 0 }}>Capture Photo</h2>
           <p>Request a live image from the bus camera.</p>
           
-          <button 
-            onClick={async () => {
-              const loading = toast.loading("Triggering camera...");
-              await fetch("http://localhost:5000/api/trips/photo/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: "BUS-01" }) });
-              toast.success("Capture command sent!", { id: loading });
-            }}
-            style={{ padding: "12px 24px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
-          >
-            <Camera size={18} /> Trigger Camera
-          </button>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 24 }}>
+            <select 
+              value={cameraBusId} 
+              onChange={(e) => setCameraBusId(e.target.value)}
+              style={{ padding: "12px", borderRadius: 6, border: "1px solid #cbd5e1", fontWeight: "bold" }}
+            >
+              {allBuses.map(b => <option key={b.busId} value={b.busId}>{b.busName} ({b.busId})</option>)}
+            </select>
+
+            <button 
+              onClick={async () => {
+                if (!cameraBusId) return toast.error("Select a bus first!");
+                const loading = toast.loading("Triggering camera...");
+                await fetch("http://localhost:5000/api/trips/photo/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ busId: cameraBusId }) });
+                toast.success("Capture command sent!", { id: loading });
+              }}
+              style={{ padding: "12px 24px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+            >
+              <Camera size={18} /> Trigger Camera
+            </button>
+          </div>
 
           <div style={{ marginTop: 32 }}>
             <CameraViewer />
@@ -481,7 +715,15 @@ export default function AdminDashboard() {
           <h2 style={{ marginTop: 0 }}>Voice Messages</h2>
           <p>Record a message to broadcast to the bus. The bus will beep 3 times.</p>
           
-          <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 24 }}>
+            <select 
+              value={audioBusId} 
+              onChange={(e) => setAudioBusId(e.target.value)}
+              style={{ padding: "12px", borderRadius: 6, border: "1px solid #cbd5e1", fontWeight: "bold" }}
+            >
+              {allBuses.map(b => <option key={b.busId} value={b.busId}>{b.busName} ({b.busId})</option>)}
+            </select>
+
             {!isRecording ? (
               <button onClick={startRecording} style={{ padding: "12px 24px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}>
                 <Mic size={18} /> Start Recording

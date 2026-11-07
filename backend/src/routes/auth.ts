@@ -13,11 +13,10 @@ router.get("/test", (req: Request, res: Response) => {
   res.json({ message: "Auth API is working!" });
 });
 
-// Registration Route
+// 1. PUBLIC REGISTRATION (For Students)
 router.post("/register", async (req: Request, res: Response) => {
   try {
-    // 1. Extract 'role' from the request body
-    const { email, password, displayName, role } = req.body;
+    const { email, password, displayName, studentId, department, phone } = req.body;
 
     if (!email || !password) {
        res.status(400).json({ error: "Email and password are required." });
@@ -27,28 +26,75 @@ router.post("/register", async (req: Request, res: Response) => {
     const userRecord = await adminAuth.createUser({
       email,
       password,
-      displayName: displayName || "New User",
+      displayName: displayName || "New Student",
     });
 
-    // 2. Default to "student" if no role is provided
-    const assignedRole = role || "student";
-
+    // FORCE the role to be "student" for public registration
     await db.collection("users").doc(userRecord.uid).set({
       uid: userRecord.uid,
       email: email,
-      displayName: displayName || "New User",
-      role: assignedRole, // 3. Apply the role here
+      displayName: displayName || "New Student",
+      role: "student", // <-- LOCKED TO STUDENT
+      studentId: studentId || "",
+      department: department || "",
+      phone: phone || "",
       createdAt: new Date().toISOString(),
     });
 
     res.status(201).json({
-      message: "User registered successfully",
+      message: "Student registered successfully",
+      uid: userRecord.uid,
+      role: "student"
+    });
+
+  } catch (error: any) {
+    console.error("Registration error:", error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// 2. PROTECTED REGISTRATION (For Admins/Operators)
+router.post("/register-staff", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    // 1. Check if the person making the request is an Admin
+    const requesterDoc = await db.collection("users").doc(req.user.uid).get();
+    if (!requesterDoc.exists || requesterDoc.data()?.role !== "admin") {
+      res.status(403).json({ error: "Only Admins can create new staff accounts." });
+      return;
+    }
+
+    const { email, password, displayName, role } = req.body;
+
+    if (!email || !password) {
+       res.status(400).json({ error: "Email and password are required." });
+       return;
+    }
+
+    // Only allow admin or operator roles
+    const assignedRole = (role === "admin" || role === "operator") ? role : "operator";
+
+    const userRecord = await adminAuth.createUser({
+      email,
+      password,
+      displayName: displayName || "New Staff",
+    });
+
+    await db.collection("users").doc(userRecord.uid).set({
+      uid: userRecord.uid,
+      email: email,
+      displayName: displayName || "New Staff",
+      role: assignedRole,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.status(201).json({
+      message: "Staff registered successfully",
       uid: userRecord.uid,
       role: assignedRole
     });
 
   } catch (error: any) {
-    console.error("Registration error:", error);
+    console.error("Staff registration error:", error);
     res.status(400).json({ error: error.message });
   }
 });
