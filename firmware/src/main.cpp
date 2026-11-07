@@ -10,12 +10,15 @@
 #include "NetworkManager.h"
 #include "GPSManager.h"
 #include "CameraManager.h"
+#include "Sim800Manager.h"
 
 // --- PIN DEFINITIONS ---
 #define I2C_SDA 5
 #define I2C_SCL 6
 #define SD_CS 21
 #define GPS_RX 44
+#define GSM_RX 1
+#define GSM_TX 2
 
 // --- WIFI & BACKEND CONFIGURATION ---
 const char* WIFI_SSID = "Fahim Jisan";       
@@ -33,6 +36,7 @@ InputManager inputs(I2C_SDA, I2C_SCL);
 NetworkManager net(WIFI_SSID, WIFI_PASS, BACKEND_URL, MQTT_SERVER);
 GPSManager gps(GPS_RX, -1);
 CameraManager camera;
+Sim800Manager gsm(GSM_RX, GSM_TX);
 
 bool oledOk = false;
 
@@ -47,6 +51,15 @@ String cameraRequestId = "";
 // Audio Request Variables
 volatile bool hasAudioRequest = false;
 String audioRequestMessage = "";    
+
+// Admin Call Request Variables
+volatile bool hasAdminCallRequest = false;
+String adminCallNumber = "";
+
+// Emergency Button Variables
+unsigned long emergencyHoldStart = 0;
+bool emergencyHoldActive = false;
+bool emergencyTriggered = false;
 
 bool checkI2CDevice(byte address) {
     Wire.beginTransmission(address);
@@ -93,6 +106,8 @@ void setup() {
     if (camera.begin()) Serial.println("[OK] Camera initialized.");
     else Serial.println("[ERROR] Camera failed.");
 
+    gsm.begin(); 
+    
     net.begin();
     
     // 1. Student Request Callback
@@ -116,6 +131,38 @@ void setup() {
     net.setAudioCallback([](String payload) {
         Serial.println("[MQTT AUDIO] " + payload);
         hasAudioRequest = true;
+    });
+
+    // 4. Admin Call Callback
+    net.setAdminCallCallback([](String payload) {
+        Serial.println("[MQTT ADMIN CALL] " + payload);
+        int start = payload.indexOf(":") + 2;
+        int end = payload.indexOf("\"", start);
+        adminCallNumber = payload.substring(start, end);
+        hasAdminCallRequest = true;
+    });
+
+    // 5. Contacts Update Callback (NEW)
+    net.setContactsUpdateCallback([](String payload) {
+        Serial.println("[MQTT CONTACTS] " + payload);
+        // Payload looks like: {"numbers":["+88017...","+88018..."]}
+        int start = payload.indexOf("[") + 1;
+        int end = payload.indexOf("]");
+        String list = payload.substring(start, end);
+        
+        String nums[5];
+        int count = 0;
+        int quoteStart = 0;
+        while (count < 5) {
+            quoteStart = list.indexOf("\"", quoteStart);
+            if (quoteStart < 0) break;
+            int quoteEnd = list.indexOf("\"", quoteStart + 1);
+            if (quoteEnd < 0) break;
+            nums[count] = list.substring(quoteStart + 1, quoteEnd);
+            count++;
+            quoteStart = quoteEnd + 1;
+        }
+        gsm.updateContacts(nums, count);
     });
 
     gps.begin();
@@ -147,7 +194,6 @@ void loop() {
         hasAudioRequest = false;
         Serial.println("[AUDIO] New voice message received!");
         
-        // 3 beeps for audio
         inputs.buzz(100); delay(100);
         inputs.buzz(100); delay(100);
         inputs.buzz(100);
@@ -169,7 +215,6 @@ void loop() {
         hasNewMqttRequest = false;
         Serial.println("[ACTION] New Request: " + mqttRequestMessage);
         
-        // 5 Beeps: 1s ON, 1s OFF
         for (int i = 0; i < 5; i++) {
             inputs.buzz(1000);
             delay(1000);
@@ -201,10 +246,32 @@ void loop() {
             display.display();
         }
     }
+
+    // 4. Admin Call Request
+    if (hasAdminCallRequest) {
+        hasAdminCallRequest = false;
+        Serial.println("[GSM] Admin requested call. Waking SIM800L...");
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("ADMIN CALLING...");
+            display.display();
+        }
+        
+        gsm.makeAdminCall(adminCallNumber);
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.println("BUS-01 ONLINE");
+            display.display();
+        }
+    }
     
     net.loopMQTT();
 
-    // 4. RFID Scan
+    // 5. RFID Scan
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
         Serial.println("[SCAN] Card: " + uid);
@@ -223,21 +290,53 @@ void loop() {
         }
     }
     
-    // 5. Emergency Button
+    // 6. Emergency Button (3-Second Hold)
     if (inputs.isEmergencyPressed()) {
-        Serial.println("[EMERGENCY] Button pressed!");
-        inputs.buzz(1000); 
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println("EMERGENCY!");
-            display.display();
+        if (!emergencyHoldActive) {
+            emergencyHoldActive = true;
+            emergencyHoldStart = millis();
+            Serial.println("[EMERGENCY] Button pressed. Hold for 3s to trigger...");
+        } 
+        else if (!emergencyTriggered && (millis() - emergencyHoldStart >= 3000)) {
+            emergencyTriggered = true;
+            Serial.println("[EMERGENCY] 3-second hold confirmed! TRIGGERING ALARM.");
+            
+            inputs.buzz(2000);
+            
+            if (oledOk) {
+                display.clearDisplay();
+                display.setCursor(0, 0);
+                display.setTextSize(2);
+                display.println("EMERGENCY!");
+                display.display();
+            }
+            
+            // Get real GPS
+            gps.update();
+            String latStr = gps.hasFix() ? String(gps.getLat(), 6) : "0.0";
+            String lngStr = gps.hasFix() ? String(gps.getLng(), 6) : "0.0";
+            
+            // 1. Send SMS to all, Call primary
+            gsm.triggerEmergency(BUS_ID, latStr, lngStr);
+            
+            // 2. POST alert to backend so dashboard pops up
+            if (net.isConnected()) {
+                net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
+            }
         }
-        delay(1000); 
+    } 
+    else {
+        if (emergencyHoldActive && !emergencyTriggered) {
+            Serial.println("[EMERGENCY] Cancelled (released before 3s).");
+        }
+        emergencyHoldActive = false;
+        if (emergencyTriggered) {
+            emergencyTriggered = false;
+            delay(1000);
+        }
     }
     
-    // 6. GPS Updates
+    // 7. GPS Updates
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000) {
         lastGps = millis();
@@ -261,7 +360,7 @@ void loop() {
         }
     }
     
-    // 7. Heartbeat
+    // 8. Heartbeat
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();

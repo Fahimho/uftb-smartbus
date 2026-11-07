@@ -30,6 +30,9 @@ export default function AdminDashboard() {
   const [allTrips, setAllTrips] = useState<any[]>([]);
   const [openMapFor, setOpenMapFor] = useState<string | null>(null);
   
+  // Emergency contacts state
+  const [emergencyContacts, setEmergencyContacts] = useState<string[]>([]);
+
   // State for Admin viewing trip attendance
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
   const [viewingTripEvents, setViewingTripEvents] = useState<any[]>([]);
@@ -70,7 +73,41 @@ export default function AdminDashboard() {
     return () => unsub();
   }, []);
 
-  // 4. Handle View Trip Attendance
+  // 4. Load Emergency Contacts on Mount
+  useEffect(() => {
+    fetch("http://localhost:5000/api/emergency/contacts/BUS-01")
+      .then(res => res.json())
+      .then(data => {
+        if (data.numbers && data.numbers.length > 0) {
+          setEmergencyContacts(data.numbers);
+        } else {
+          setEmergencyContacts([""]);
+        }
+      })
+      .catch(() => setEmergencyContacts([""]));
+  }, []);
+
+  // Save Emergency Contacts to Backend (and ESP32 via MQTT)
+  const saveContacts = async () => {
+    const filteredNumbers = emergencyContacts.filter(n => n.trim() !== "");
+    if (filteredNumbers.length === 0) {
+      toast.error("Please add at least one number");
+      return;
+    }
+    const loading = toast.loading("Saving contacts...");
+    try {
+      await fetch("http://localhost:5000/api/emergency/contacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ busId: "BUS-01", numbers: filteredNumbers })
+      });
+      toast.success("Contacts saved and sent to bus!", { id: loading });
+    } catch (err) {
+      toast.error("Failed to save contacts", { id: loading });
+    }
+  };
+
+  // 5. Handle View Trip Attendance
   const handleViewTrip = (tripId: string) => {
     setViewingTripId(tripId);
     const q = query(collection(db, "tripAttendance"), where("tripId", "==", tripId));
@@ -278,6 +315,55 @@ export default function AdminDashboard() {
       {/* ========================================== */}
       {activeTab === "emergency" && (
         <div>
+          {/* EMERGENCY CONTACTS SETUP */}
+          <div style={{ background: "white", padding: 24, borderRadius: 12, marginBottom: 24 }}>
+            <h3 style={{ marginTop: 0 }}>Emergency Contacts</h3>
+            <p style={{ color: "#64748b", fontSize: 14 }}>The ESP32 will send an SMS to these numbers and call the primary number when the emergency button is held.</p>
+            
+            {emergencyContacts.map((num, index) => (
+              <div key={index} style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+                <input 
+                  type="text" 
+                  value={num} 
+                  onChange={(e) => {
+                    const newNums = [...emergencyContacts];
+                    newNums[index] = e.target.value;
+                    setEmergencyContacts(newNums);
+                  }}
+                  placeholder={index === 0 ? "Primary Number (+880...)" : `Optional Number ${index}`}
+                  style={{ padding: 8, border: "1px solid #cbd5e1", borderRadius: 6, flex: 1 }}
+                />
+                {index > 0 && (
+                  <button 
+                    onClick={() => {
+                      const newNums = emergencyContacts.filter((_, i) => i !== index);
+                      setEmergencyContacts(newNums);
+                    }}
+                    style={{ padding: "8px 12px", background: "#fee2e2", color: "#b91c1c", border: "none", borderRadius: 6, cursor: "pointer" }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+            
+            <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+              <button 
+                onClick={() => setEmergencyContacts([...emergencyContacts, ""])}
+                style={{ padding: "8px 16px", background: "#e2e8f0", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
+              >
+                + Add Optional Number
+              </button>
+
+              <button 
+                onClick={saveContacts}
+                style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
+              >
+                Save Contacts
+              </button>
+            </div>
+          </div>
+
           <h3 style={{ marginTop: 0 }}>Active Emergencies</h3>
           {emergencies.length === 0 ? (
             <div style={{ background: "white", padding: 48, borderRadius: 12, textAlign: "center", color: "#64748b" }}>
@@ -309,6 +395,23 @@ export default function AdminDashboard() {
                     style={{ padding: "10px 20px", background: "#10b981", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }}
                   >
                     Acknowledge & Resolve
+                  </button>
+
+                  <button 
+                    onClick={async () => {
+                      const primaryNum = emergencyContacts[0];
+                      if (!primaryNum) return toast.error("Set a primary number first!");
+                      toast.loading("Waking up SIM800L...");
+                      await fetch("http://localhost:5000/api/emergency/call-bus", { 
+                        method: "POST", 
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ busId: em.busId, phoneNumber: primaryNum }) 
+                      });
+                      toast.success("Call command sent to bus!", { id: "call" });
+                    }}
+                    style={{ padding: "10px 20px", background: "#f59e0b", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+                  >
+                    📞 Call Bus
                   </button>
                   
                   <button 

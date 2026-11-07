@@ -21,7 +21,9 @@ public:
     
     void setMessageCallback(std::function<void(String)> callback);
     void setCameraCallback(std::function<void(String)> callback);
-    void setAudioCallback(std::function<void(String)> callback); // <-- New
+    void setAudioCallback(std::function<void(String)> callback); 
+    void setAdminCallCallback(std::function<void(String)> callback);
+    void setContactsUpdateCallback(std::function<void(String)> callback);
 
 private:
     const char* ssid;
@@ -34,6 +36,8 @@ private:
     
     std::function<void(String)> onMessage;
     std::function<void(String)> onCamera;
-    std::function<void(String)> onAudio; // <--New
+    std::function<void(String)> onAudio; 
+    std::function<void(String)> onAdminCall;
+    std::function<void(String)> onContactsUpdate; // <-- ADD New
     void connectMQTT();
 };

@@ -4,6 +4,7 @@ import cors from "cors";
 import authRoutes from "./routes/auth.ts";
 import tripRoutes from "./routes/trips.ts";
 import mqtt from "mqtt";
+import emergencyRoutes from "./routes/emergency.ts";
 
 const app = express();
 const PORT = process.env.BACKEND_PORT || 5000;
@@ -27,6 +28,7 @@ app.use(express.json());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/trips", tripRoutes);
+app.use("/api/emergency", emergencyRoutes);
 
 app.listen(PORT, () => {
   console.log("========================================");

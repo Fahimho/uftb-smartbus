@@ -44,10 +44,12 @@ void NetworkManager::connectMQTT() {
     if (mqttClient.connect(clientId.c_str(), "SMART-BUS", "uftbsmartbus@")) {
         Serial.println("[MQTT] Connected to EMQX Cloud!");
         mqttClient.subscribe("smartbus/BUS-01/request");
-        mqttClient.subscribe("smartbus/BUS-01/camera"); // <-- Subscribe to camera topic
-        mqttClient.subscribe("smartbus/BUS-01/audio"); // <-- Subscribe to audio topic
+        mqttClient.subscribe("smartbus/BUS-01/camera");
+        mqttClient.subscribe("smartbus/BUS-01/audio");
+        mqttClient.subscribe("smartbus/BUS-01/commands");
+         mqttClient.subscribe("smartbus/BUS-01/contacts"); // <-- ADD THIS
 
-        Serial.println("[MQTT] Subscribed to request, camera, and audio topics");
+        Serial.println("[MQTT] Subscribed to request, camera, audio, and commands topics");
     } else {
         Serial.print("[MQTT] Failed, rc=");
         Serial.println(mqttClient.state());
@@ -76,13 +78,16 @@ void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
         }
         String t = String(topic);
         
-        // Route the message based on the topic
         if (t.indexOf("request") > 0 && onMessage) {
             onMessage(message);
         } else if (t.indexOf("camera") > 0 && onCamera) {
             onCamera(message);
-               } else if (t.indexOf("audio") > 0 && onAudio) {
+        } else if (t.indexOf("audio") > 0 && onAudio) {
             onAudio(message);
+        } else if (t.indexOf("commands") > 0 && onAdminCall) {
+            onAdminCall(message);
+        }else if (t.indexOf("contacts") > 0 && onContactsUpdate) { // <-- ADD THIS
+            onContactsUpdate(message);
         }
     });
 }
@@ -93,6 +98,14 @@ void NetworkManager::setCameraCallback(std::function<void(String)> callback) {
 
 void NetworkManager::setAudioCallback(std::function<void(String)> callback) {
     onAudio = callback;
+}
+
+void NetworkManager::setAdminCallCallback(std::function<void(String)> callback) {
+    onAdminCall = callback;
+}
+
+void NetworkManager::setContactsUpdateCallback(std::function<void(String)> callback) {
+    onContactsUpdate = callback;
 }
 
 bool NetworkManager::postAttendance(String uid, String type, String busId) {
@@ -137,7 +150,6 @@ bool NetworkManager::uploadPhoto(String requestId, String base64Image) {
     String url = String(backendUrl) + "/api/trips/photo/upload";
     http.begin(url);
     
-    // ADD THIS LINE: Give it 20 seconds to upload the large image
     http.setTimeout(20000); 
     
     http.addHeader("Content-Type", "application/json");

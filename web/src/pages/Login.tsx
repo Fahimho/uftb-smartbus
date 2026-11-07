@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../firebase";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext"; // <-- IMPORT
 import toast from "react-hot-toast";
 
 export default function Login() {
@@ -11,26 +12,24 @@ export default function Login() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   
   const navigate = useNavigate();
+  const { user, loading } = useAuth(); // <-- USE AUTH CONTEXT
 
-  // Force sign out the moment the Login page loads.
-  // This clears any cached session from previous tabs.
+  // If already logged in, redirect to dashboard
   useEffect(() => {
-    signOut(auth).catch(() => {}); // Ignore errors if not logged in
-  }, []);
+    if (!loading && user) {
+      navigate("/");
+    }
+  }, [user, loading, navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoggingIn(true);
     
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      
-      // Wait until Firebase actually confirms the user session
-      if (userCredential.user) {
-        toast.success(`Welcome back!`);
-        navigate("/"); 
-      }
-      
+      await signInWithEmailAndPassword(auth, email, password);
+      toast.success(`Welcome back!`);
+      // Note: We do NOT call navigate("/") here. 
+      // The useEffect above will handle the redirect once AuthContext finishes fetching the profile.
     } catch (err: any) {
       if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
         toast.error("Invalid email or password.");
@@ -40,6 +39,8 @@ export default function Login() {
       setIsLoggingIn(false);
     }
   };
+
+  if (loading) return <div>Loading...</div>; // Prevent flickering
 
   return (
     <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center", background: "#f3f4f6", fontFamily: "system-ui" }}>
