@@ -350,10 +350,10 @@ export default function AdminDashboard() {
         toast.success(`Recording request sent to ${getBusName(audioBusId)}. Waiting...`, { id: "listen", duration: 3000 });
         listenTimerRef.current = setTimeout(() => {
           if (listeningForBus) {
-            toast.error("Bus did not respond in 30 seconds. Check if the bus is online.", { id: "listen" });
+            toast.error("Bus did not respond in 45 seconds. Check if the bus is online.", { id: "listen" });
             setListeningForBus(false);
           }
-        }, 30000);
+        }, 45000);
       } else {
         toast.error(data.error || "Failed to send request", { id: "listen" });
         setListeningForBus(false);
