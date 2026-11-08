@@ -407,4 +407,30 @@ router.post("/audio/upload", async (req: Request, res: Response) => {
   }
 });
 
+// ==========================================
+// 17. Delete a single photo (Firestore + Storage)
+// ==========================================
+router.delete("/photo/:requestId", async (req: Request, res: Response) => {
+  try {
+    const { requestId } = req.params;
+    const docRef = db.collection("capturePhotoRequests").doc(requestId);
+    const doc = await docRef.get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    // Delete from Firestore
+    await docRef.delete();
+    // Delete from Storage
+    const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
+    const file = bucket.file(`photos/${requestId}.jpg`);
+    await file.delete().catch(() => {
+      console.log(`[STORAGE] Photo ${requestId}.jpg already gone.`);
+    });
+    res.status(200).json({ message: "Photo deleted successfully" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import Layout from "../components/Layout";
 import LiveMap from "../components/LiveMap";
 import { AlertTriangle, Map as MapIcon, X, Camera, Mic, Square, Bus, Trash2, Wifi, UserPlus, Users, Eye, EyeOff } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, RotateCcw } from "lucide-react";
 import { getFirestore, collection, onSnapshot, query, where, doc, deleteDoc } from "firebase/firestore";
 import { connectFirestoreEmulator } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
@@ -16,6 +17,7 @@ import { auth } from "../firebase";
 // Fix Leaflet icons
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+
 let DefaultIcon = L.icon({ iconUrl: icon, shadowUrl: iconShadow, iconSize: [25, 41], iconAnchor: [12, 41] });
 L.Marker.prototype.options.icon = DefaultIcon;
 
@@ -878,7 +880,7 @@ export default function AdminDashboard() {
           </div>
 
           <div style={{ marginTop: 32 }}>
-            <CameraViewer />
+            <PhotoGallery selectedBusId={cameraBusId} busName={getBusName(cameraBusId)} />
           </div>
         </div>
       )}
@@ -917,54 +919,231 @@ export default function AdminDashboard() {
   );
 }
 
-function CameraViewer() {
-  const [photo, setPhoto] = useState<any>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
+function PhotoGallery({ selectedBusId, busName }: { selectedBusId: string, busName: string }) {
+  const [photos, setPhotos] = useState<any[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const q = query(collection(db, "capturePhotoRequests"), where("status", "==", "STORED"));
-    const unsub = onSnapshot(q, async (snapshot) => {
-      if (!snapshot.empty) {
-        const sorted = snapshot.docs.map(d => ({ id: d.id, ...d.data() })).sort((a: any, b: any) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
-        const latestPhoto = sorted[0] as any;
-        setPhoto(latestPhoto);
+    if (!selectedBusId) {
+      setPhotos([]);
+      setLoading(false);
+      return;
+    }
 
+    setLoading(true);
+    setPhotos([]);
+    setCurrentIndex(0);
+    setImageUrls({});
+
+    const q = query(
+      collection(db, "capturePhotoRequests"),
+      where("status", "==", "STORED"),
+      where("busId", "==", selectedBusId)
+    );
+
+    const unsub = onSnapshot(q, async (snapshot) => {
+      const sorted = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+      setPhotos(sorted);
+
+      for (const photo of sorted) {
         try {
-          const url = await getDownloadURL(ref(storage, `photos/${latestPhoto.id}.jpg`));
-          setImageUrl(url);
-        } catch (err) {
-          console.error("Error fetching image:", err);
+          const url = await getDownloadURL(ref(storage, `photos/${photo.id}.jpg`));
+          setImageUrls(prev => ({ ...prev, [photo.id]: url }));
+        } catch (e) {
+          console.warn(`Could not load photo ${photo.id}`, e);
         }
       }
       setLoading(false);
     });
+
     return () => unsub();
-  }, []);
+  }, [selectedBusId]);
 
-  if (loading) return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 48 }}>
-      <div style={{ width: 40, height: 40, border: "4px solid #e2e8f0", borderTop: "4px solid #3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
-      <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-      <p style={{ marginTop: 16, color: "#64748b" }}>Loading camera...</p>
-    </div>
-  );
+  const goNext = () => setCurrentIndex(i => Math.min(i + 1, photos.length - 1));
+  const goPrev = () => setCurrentIndex(i => Math.max(i - 1, 0));
 
-  if (!photo) return (
-    <div style={{ background: "#f8fafc", padding: 48, borderRadius: 12, border: "2px dashed #cbd5e1", textAlign: "center", color: "#64748b" }}>
-      <p>No photos captured yet. Click "Trigger Camera" to request a photo.</p>
-    </div>
-  );
+  const handleDelete = async (photoId: string) => {
+    if (!window.confirm("Delete this photo from database and storage?")) return;
+    const loadingToast = toast.loading("Deleting photo...");
+    try {
+      const res = await fetch(`http://localhost:5000/api/trips/photo/${photoId}`, { method: "DELETE" });
+      if (res.ok) {
+        toast.success("Photo deleted", { id: loadingToast });
+        setImageUrls(prev => {
+          const copy = { ...prev };
+          delete copy[photoId];
+          return copy;
+        });
+        if (currentIndex >= photos.length - 1 && currentIndex > 0) {
+          setCurrentIndex(currentIndex - 1);
+        }
+      } else {
+        toast.error("Failed to delete photo", { id: loadingToast });
+      }
+    } catch (err) {
+      toast.error("Network error", { id: loadingToast });
+    }
+  };
+
+  const handleDownload = (photoId: string) => {
+    const url = imageUrls[photoId];
+    if (!url) return toast.error("Photo not loaded yet");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${busName}_${photoId}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const handleDownloadAll = async () => {
+    if (photos.length === 0) return toast.error("No photos to download");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const folderName = `${busName}_${selectedBusId}_${timestamp}`;
+    toast.loading(`Downloading ${photos.length} photos...`, { id: "dlall" });
+    for (let i = 0; i < photos.length; i++) {
+      const photo = photos[i];
+      const url = imageUrls[photo.id];
+      if (!url) continue;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${folderName}_photo_${i + 1}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    toast.success(`${photos.length} photos downloaded`, { id: "dlall" });
+  };
+
+  const handleDeleteAll = async () => {
+    if (photos.length === 0) return toast.error("No photos to delete");
+    if (!window.confirm(`Delete ALL ${photos.length} photos for ${busName}? This cannot be undone.`)) return;
+
+    const loadingToast = toast.loading(`Deleting ${photos.length} photos...`);
+    let failed = 0;
+
+    for (const photo of photos) {
+      try {
+        const res = await fetch(`http://localhost:5000/api/trips/photo/${photo.id}`, { method: "DELETE" });
+        if (!res.ok) failed++;
+      } catch {
+        failed++;
+      }
+    }
+
+    if (failed === 0) {
+      toast.success(`All ${photos.length} photos deleted`, { id: loadingToast });
+    } else {
+      toast.error(`${failed} photos failed to delete`, { id: loadingToast });
+    }
+
+    setPhotos([]);
+    setCurrentIndex(0);
+    setImageUrls({});
+  };
+
+  const handleReset = () => {
+    setCurrentIndex(0);
+    setImageUrls({});
+    toast.success("Gallery reset");
+  };
+
+  if (loading) {
+    return (
+      <div style={{ padding: 48, textAlign: "center", color: "#64748b" }}>
+        <div style={{ width: 40, height: 40, border: "4px solid #e2e8f0", borderTop: "4px solid #3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto" }} />
+        <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+        <p style={{ marginTop: 16 }}>Loading photos...</p>
+      </div>
+    );
+  }
+
+  if (photos.length === 0) {
+    return (
+      <div style={{ background: "#f8fafc", padding: 48, borderRadius: 12, border: "2px dashed #cbd5e1", textAlign: "center", color: "#64748b" }}>
+        <p>No photos captured yet for {busName}. Click "Trigger Camera" to request one.</p>
+      </div>
+    );
+  }
+
+  const current = photos[currentIndex];
+  const currentUrl = imageUrls[current?.id];
 
   return (
-    <div style={{ background: "#f8fafc", padding: 24, borderRadius: 12, border: "1px solid #e2e8f0" }}>
-      <p style={{ margin: "0 0 8px 0" }}><strong>Status:</strong> {photo.status}</p>
-      <p style={{ margin: "0 0 16px 0" }}><strong>Time:</strong> {new Date(photo.uploadedAt).toLocaleTimeString()}</p>
-      {imageUrl ? (
-        <img src={imageUrl} alt="Bus Capture" style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #ccc", boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }} />
-      ) : (
-        <p>Loading image...</p>
-      )}
+    <div>
+      {/* Main Viewer */}
+      <div style={{ position: "relative", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, background: "#f8fafc" }}>
+        {currentUrl ? (
+          <img src={currentUrl} alt="Captured" style={{ maxWidth: "100%", maxHeight: 500, borderRadius: 8, display: "block", margin: "0 auto" }} />
+        ) : (
+          <div style={{ height: 300, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b" }}>Loading image...</div>
+        )}
+
+        <div style={{ position: "absolute", top: 24, right: 24, background: "rgba(0,0,0,0.6)", color: "white", padding: "4px 12px", borderRadius: 8, fontSize: 14, fontWeight: "bold" }}>
+          {currentIndex + 1} / {photos.length}
+        </div>
+
+        {currentIndex > 0 && (
+          <button onClick={goPrev} style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", color: "white", border: "none", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <ChevronLeft size={28} />
+          </button>
+        )}
+
+        {currentIndex < photos.length - 1 && (
+          <button onClick={goNext} style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", color: "white", border: "none", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <ChevronRight size={28} />
+          </button>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+          <div style={{ fontSize: 14, color: "#64748b" }}>
+            <strong>Captured:</strong> {new Date(current.uploadedAt).toLocaleString()}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => handleDownload(current.id)} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
+              <Download size={16} /> Download
+            </button>
+            <button onClick={() => handleDelete(current.id)} style={{ padding: "8px 16px", background: "#ef4444", color: "white", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
+              <Trash2 size={16} /> Delete
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Thumbnails */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16, overflowX: "auto", paddingBottom: 8 }}>
+        {photos.map((photo, i) => (
+          <div
+            key={photo.id}
+            onClick={() => setCurrentIndex(i)}
+            style={{ width: 100, height: 70, flexShrink: 0, borderRadius: 6, cursor: "pointer", border: i === currentIndex ? "3px solid #3b82f6" : "2px solid #e2e8f0", overflow: "hidden", background: "#f8fafc" }}
+          >
+            {imageUrls[photo.id] ? (
+              <img src={imageUrls[photo.id]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#cbd5e1", fontSize: 10 }}>...</div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Bulk Actions */}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+        <button onClick={handleReset} style={{ padding: "10px 20px", background: "#e2e8f0", color: "#334155", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
+          <RotateCcw size={16} /> Reset
+        </button>
+        <button onClick={handleDownloadAll} style={{ padding: "10px 20px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
+          <Download size={16} /> Download All ({photos.length})
+        </button>
+        <button onClick={handleDeleteAll} style={{ padding: "10px 20px", background: "#ef4444", color: "white", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
+          <Trash2 size={16} /> Delete All ({photos.length})
+        </button>
+      </div>
     </div>
   );
 }
