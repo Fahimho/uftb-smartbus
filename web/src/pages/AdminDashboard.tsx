@@ -70,6 +70,7 @@ export default function AdminDashboard() {
   const [voiceRequests, setVoiceRequests] = useState<any[]>([]);
   const [listeningForBus, setListeningForBus] = useState(false);
   const [voiceUrls, setVoiceUrls] = useState<Record<string, string>>({});
+  const listenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // State for Admin viewing trip attendance
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
@@ -143,28 +144,18 @@ export default function AdminDashboard() {
     return () => unsub();
   }, [audioBusId]);
 
-  // 6. Listen to voice request status changes (for timeout)
+  // 6. NEW: Clear timeout when a new recording arrives
   useEffect(() => {
-    if (!listeningForBus || !audioBusId) return;
-    const q = query(
-      collection(db, "voiceRequests"),
-      where("busId", "==", audioBusId),
-      where("status", "==", "PENDING")
-    );
-    const unsub = onSnapshot(q, (snapshot) => {
-      if (snapshot.empty && listeningForBus) {
-        // Nothing pending; check if a STORED one just appeared
-        // Handled by voiceRequests listener
+    if (voiceRequests.length > 0 && listeningForBus) {
+      if (listenTimerRef.current) {
+        clearTimeout(listenTimerRef.current);
+        listenTimerRef.current = null;
       }
-    });
-    const timer = setTimeout(() => {
-      if (listeningForBus) {
-        toast.error("Bus did not respond in 30 seconds. Check if the bus is online.", { id: "listen" });
-        setListeningForBus(false);
-      }
-    }, 30000);
-    return () => { unsub(); clearTimeout(timer); };
-  }, [listeningForBus, audioBusId]);
+      setListeningForBus(false);
+      toast.dismiss("listen");
+      toast.success("Recording received!", { id: "listen-ok" });
+    }
+  }, [voiceRequests, listeningForBus]);
 
   // 7. Fetch ALL Buses on mount
   const fetchAllBuses = () => {
@@ -357,6 +348,12 @@ export default function AdminDashboard() {
       const data = await res.json();
       if (res.ok) {
         toast.success(`Recording request sent to ${getBusName(audioBusId)}. Waiting...`, { id: "listen", duration: 3000 });
+        listenTimerRef.current = setTimeout(() => {
+          if (listeningForBus) {
+            toast.error("Bus did not respond in 30 seconds. Check if the bus is online.", { id: "listen" });
+            setListeningForBus(false);
+          }
+        }, 30000);
       } else {
         toast.error(data.error || "Failed to send request", { id: "listen" });
         setListeningForBus(false);
@@ -417,9 +414,6 @@ export default function AdminDashboard() {
     const bus = allBuses.find(b => b.busId === busId);
     return bus ? bus.busName || "Unnamed" : busId;
   };
-
-  // Helper to get bus name from bus object or id
-  const getBusNameById = (busId: string) => getBusName(busId);
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -673,7 +667,6 @@ export default function AdminDashboard() {
       {activeTab === "buses" && (
         <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 24 }}>
           
-          {/* Bus List Sidebar */}
           <div style={{ background: "white", padding: 24, borderRadius: 12, boxShadow: "0 1px 3px rgb(0 0 0 / 0.1)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h3 style={{ margin: 0 }}>Buses</h3>
@@ -706,7 +699,6 @@ export default function AdminDashboard() {
             {allBuses.length === 0 && <p style={{ color: "#64748b", fontSize: 14 }}>No buses yet. Click + to add.</p>}
           </div>
 
-          {/* Setup Form */}
           <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
             {!selectedBusId ? (
               <div style={{ textAlign: "center", color: "#64748b", padding: 48 }}>
@@ -717,7 +709,6 @@ export default function AdminDashboard() {
               <>
                 <h2 style={{ marginTop: 0 }}>Setup: {selectedBusId}</h2>
                 
-                {/* IP Address Box */}
                 <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, marginBottom: 24 }}>
                   <Wifi size={20} color="#166534" />
                   <div>
@@ -819,7 +810,6 @@ export default function AdminDashboard() {
       {activeTab === "staff" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           
-          {/* Create Staff Form */}
           <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
               <UserPlus size={24} color="#3b82f6" />
@@ -860,7 +850,6 @@ export default function AdminDashboard() {
             </form>
           </div>
 
-          {/* Staff List */}
           <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
               <Users size={24} color="#3b82f6" />
@@ -997,7 +986,6 @@ export default function AdminDashboard() {
             </button>
           </div>
 
-          {/* Voice Inbox */}
           <div style={{ marginTop: 32 }}>
             <h3>🎧 Voice Inbox — {getBusName(audioBusId)}</h3>
             {voiceRequests.length === 0 ? (
@@ -1014,17 +1002,43 @@ export default function AdminDashboard() {
                       <audio controls src={voiceUrls[v.id]} style={{ width: "100%" }} />
                     )}
                     {voiceUrls[v.id] && (
-                      <button 
-                        onClick={() => {
-                          const a = document.createElement("a");
-                          a.href = voiceUrls[v.id];
-                          a.download = `${getBusName(v.busId)}_${v.id}.mp3`;
-                          a.click();
-                        }}
-                        style={{ marginTop: 8, padding: "6px 12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
-                      >
-                        ⬇ Download
-                      </button>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button 
+                          onClick={() => {
+                            const a = document.createElement("a");
+                            a.href = voiceUrls[v.id];
+                            a.download = `${getBusName(v.busId)}_${v.id}.mp3`;
+                            a.click();
+                          }}
+                          style={{ padding: "6px 12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "bold" }}
+                        >
+                          ⬇ Download
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            if (!window.confirm("Delete this recording from database and storage?")) return;
+                            const loadingToast = toast.loading("Deleting recording...");
+                            try {
+                              const res = await fetch(`http://localhost:5000/api/trips/voice/${v.id}`, { method: "DELETE" });
+                              if (res.ok) {
+                                toast.success("Recording deleted", { id: loadingToast });
+                                setVoiceUrls(prev => {
+                                  const copy = { ...prev };
+                                  delete copy[v.id];
+                                  return copy;
+                                });
+                              } else {
+                                toast.error("Failed to delete recording", { id: loadingToast });
+                              }
+                            } catch (err) {
+                              toast.error("Network error", { id: loadingToast });
+                            }
+                          }}
+                          style={{ padding: "6px 12px", background: "#ef4444", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: "bold" }}
+                        >
+                          🗑 Delete
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}

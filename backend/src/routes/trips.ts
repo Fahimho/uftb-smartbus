@@ -542,4 +542,36 @@ router.post("/voice/upload", async (req: Request, res: Response) => {
   }
 });
 
+// ==========================================
+// 20. Delete a voice recording (Firestore + Storage)
+// ==========================================
+router.delete("/voice/:voiceId", async (req: Request, res: Response) => {
+  try {
+    const { voiceId } = req.params;
+    const docRef = db.collection("voiceRequests").doc(voiceId);
+    const doc = await docRef.get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "Voice recording not found" });
+      return;
+    }
+    const data = doc.data();
+    const storagePath = data?.storagePath;
+    
+    // Delete from Firestore
+    await docRef.delete();
+    
+    // Delete from Storage
+    if (storagePath) {
+      const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
+      const file = bucket.file(storagePath);
+      await file.delete().catch(() => {
+        console.log(`[STORAGE] Voice ${storagePath} already gone.`);
+      });
+    }
+    
+    res.status(200).json({ message: "Voice recording deleted" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 export default router;
