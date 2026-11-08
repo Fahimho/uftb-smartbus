@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <WiFiManager.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
 #include "ResourceManager.h"
 #include "RFIDManager.h"
 #include "SDManager.h"
@@ -36,7 +37,7 @@ Adafruit_SSD1306 display(128, 64, &Wire, -1);
 ResourceManager resMgr;
 RFIDManager rfid(UINT8_MAX, resMgr);
 SDManager sd(SD_CS, resMgr);
-InputManager inputs(I2C_SDA, I2C_SCL);
+InputManager inputs(resMgr);
 NetworkManager net("", "", BACKEND_URL, MQTT_SERVER); 
 GPSManager gps(GPS_RX, -1);
 CameraManager camera;
@@ -65,9 +66,11 @@ unsigned long emergencyHoldStart = 0;
 bool emergencyHoldActive = false;
 bool emergencyTriggered = false;
 
-bool checkI2CDevice(byte address) {
-    Wire.beginTransmission(address);
-    return (Wire.endTransmission() == 0);
+// --- Helper to center text ---
+int getCenterX(String text, int textSize) {
+    int charWidth = 6 * textSize;
+    int textWidth = text.length() * charWidth;
+    return (128 - textWidth) / 2;
 }
 
 void setup() {
@@ -77,120 +80,145 @@ void setup() {
     Serial.println("UFTB SmartBus - FULL SYSTEM");
     Serial.println("========================================");
 
-    // 1. Load Bus ID from memory
+    // 1. INITIALIZE RESOURCE MANAGER
+    resMgr.begin();
+
+    // 2. INITIALIZE OLED
+    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        oledOk = true;
+        Serial.println("[OK] OLED found at 0x3C");
+    } else if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+        oledOk = true;
+        Serial.println("[OK] OLED found at 0x3D");
+    } else {
+        Serial.println("[ERROR] OLED NOT found at 0x3C or 0x3D");
+    }
+
+    if (oledOk) {
+        display.clearDisplay();
+        display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(1);
+        display.setCursor(0, 0);
+        display.println("BOOTING...");
+        display.display();
+    }
+
+    // 3. INIT INPUTS
+    inputs.begin();
+
+    // 4. CHECK FOR FACTORY RESET
+    if (inputs.isSelectPressed()) {
+        Serial.println("[FACTORY RESET] Wiping memory...");
+        preferences.begin("smartbus", false);
+        preferences.clear();
+        preferences.end();
+        delay(2000);
+        ESP.restart();
+    }
+
+    // 5. LOAD BUS ID
     preferences.begin("smartbus", false);
     BUS_ID = preferences.getString("busId", "");
+    preferences.end();
 
-    // 2. If no Bus ID is saved, start the Captive Portal
     if (BUS_ID == "") {
         Serial.println("[SETUP] No Bus ID found. Starting Captive Portal...");
-        
         WiFiManager wifiManager;
         wifiManager.setConfigPortalTimeout(300); 
         wifiManager.startConfigPortal("SmartBus-Setup");
 
-        WiFiServer server(80);
-        server.begin();
-        
+        WebServer server(80);
         if (oledOk) {
             display.clearDisplay();
             display.setCursor(0, 0);
             display.println("SETUP MODE");
-            display.println("Wi-Fi Connected.");
             display.println("Open Browser to:");
             display.println(WiFi.localIP());
             display.display();
         }
 
-        Serial.println("========================================");
-        Serial.println("Wi-Fi Connected!");
-        Serial.print("Open this IP in your browser: ");
-        Serial.println(WiFi.localIP());
-        Serial.println("========================================");
+        server.on("/", HTTP_GET, [&]() {
+            String html = "<html><body><h2>SmartBus Setup</h2>";
+            html += "<form action='/save' method='GET'>";
+            html += "Bus ID: <input type='text' name='busId' required><br><br>";
+            html += "<input type='submit' value='Save & Reboot'></form></body></html>";
+            server.send(200, "text/html", html);
+        });
 
-        bool configured = false;
-        while (!configured) {
-            WiFiClient client = server.available();
-            if (client) {
-                String request = client.readStringUntil('\r');
-                if (request.indexOf("/save") != -1) {
-                    int idIndex = request.indexOf("busId=");
-                    if (idIndex != -1) {
-                        String rawId = request.substring(idIndex + 6, request.indexOf(" ", idIndex));
-                        
-                        rawId.trim();
-                        rawId.toUpperCase(); 
-                        rawId.replace("BUS-", "");
-                        rawId.replace("BUS", "");
-                        int busNum = rawId.toInt();
-                        char formattedId[10];
-                        sprintf(formattedId, "BUS-%02d", busNum);
-                        String newId = String(formattedId);
-
-                        preferences.putString("busId", newId);
-                        BUS_ID = newId;
-                        configured = true;
-                        
-                        client.println("HTTP/1.1 200 OK");
-                        client.println("Content-Type: text/html");
-                        client.println("Connection: close");
-                        client.println();
-                        client.println("<h1>Success! Bus ID set to " + newId + ". Rebooting...</h1>");
-                        client.stop();
-                        delay(2000);
-                        ESP.restart();
-                    }
-                } else {
-                    client.println("HTTP/1.1 200 OK");
-                    client.println("Content-Type: text/html");
-                    client.println("Connection: close");
-                    client.println();
-                    client.println("<html><body>");
-                    client.println("<h2>SmartBus Setup</h2>");
-                    client.println("<p>Enter the Bus Number (e.g. 1, 2, 15)</p>");
-                    client.println("<form action='/save'>");
-                    client.println("Bus ID: <input type='text' name='busId' placeholder='1' required><br><br>");
-                    client.println("<input type='submit' value='Save & Reboot'>");
-                    client.println("</form></body></html>");
-                    client.stop();
-                }
+        server.on("/save", HTTP_GET, [&]() {
+            if (server.hasArg("busId")) {
+                String rawId = server.arg("busId");
+                rawId.trim(); rawId.toUpperCase(); 
+                rawId.replace("BUS-", ""); rawId.replace("BUS", "");
+                char formattedId[10];
+                sprintf(formattedId, "BUS-%02d", rawId.toInt());
+                String newId = String(formattedId);
+                preferences.putString("busId", newId);
+                BUS_ID = newId;
+                server.send(200, "text/html", "<h1 style='color:green;'>Success! Rebooting...</h1>");
+                delay(3000);
+                ESP.restart();
+            } else {
+                server.send(400, "text/plain", "Missing busId");
             }
-            delay(10);
+        });
+
+        server.begin();
+        while (true) { server.handleClient(); delay(10); }
+    } else {
+        Serial.println("[WiFi] Connecting to saved network...");
+        WiFi.begin(); 
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500); Serial.print(".");
+            attempts++;
+        }
+        Serial.println();
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.print("[WiFi] Connected! IP: ");
+            Serial.println(WiFi.localIP());
+        } else {
+            Serial.println("[WiFi] Connection failed.");
         }
     }
 
+    // --- UPDATE OLED HERE (SINGLE LINE BOX + IP) ---
+    if (oledOk) {
+        display.clearDisplay();
+        
+        // Draw the top box
+        display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+        
+        // "BUS-01 ONLINE" Centered in the top box
+        String topText = BUS_ID + " ONLINE";
+        display.setTextSize(1);
+        display.setCursor(getCenterX(topText, 1), 6); // Y=6 centers it vertically in a 20px box
+        display.print(topText);
+        
+        // IP Address centered at the bottom
+        String ipStr = "IP: " + WiFi.localIP().toString();
+        display.setCursor(getCenterX(ipStr, 1), 50);
+        display.print(ipStr);
+        
+        display.display();
+    }
+    // -------------------------------------------------
+
     Serial.println("[SETUP] Operating as: " + BUS_ID);
 
-    Wire.begin(I2C_SDA, I2C_SCL);
+    // 6. INITIALIZE OTHER HARDWARE
     Wire.setClock(100000); 
-    
-    resMgr.begin();
-    inputs.begin();
-
-    uint8_t oledAddr = 0;
-    if (checkI2CDevice(0x3C)) oledAddr = 0x3C;
-    else if (checkI2CDevice(0x3D)) oledAddr = 0x3D;
-
-    if (oledAddr != 0) {
-        oledOk = true;
-        display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
-        display.clearDisplay();
-        display.setTextColor(SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(0, 0);
-        display.println(BUS_ID + " ONLINE");
-        display.display();
-        Serial.println("[OK] OLED Display found.");
-    }
 
     SPI.begin(7, 8, 9, SD_CS);
-    
+    delay(500);
     if (rfid.begin()) Serial.println("[OK] MFRC522 RFID found.");
     else Serial.println("[ERROR] MFRC522 RFID NOT found.");
-
+    
+    delay(500);
     if (sd.begin()) Serial.println("[OK] microSD Card found.");
     else Serial.println("[ERROR] microSD Card NOT found.");
-
+    
+    delay(500);
     if (camera.begin()) Serial.println("[OK] Camera initialized.");
     else Serial.println("[ERROR] Camera failed.");
 
@@ -202,23 +230,16 @@ void setup() {
     // --- OTA Setup ---
     ArduinoOTA.setHostname(BUS_ID.c_str()); 
     ArduinoOTA.setPassword("uftbsmartbus"); 
-    
-    ArduinoOTA.onStart([]() {
-        Serial.println("[OTA] Update Starting...");
-    });
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\n[OTA] Update Complete. Rebooting...");
-    });
+    ArduinoOTA.onStart([]() { Serial.println("[OTA] Update Starting..."); });
+    ArduinoOTA.onEnd([]() { Serial.println("\n[OTA] Update Complete. Rebooting..."); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
     });
     ArduinoOTA.onError([](ota_error_t error) {
         Serial.printf("[OTA] Error[%u]: ", error);
     });
-    
     ArduinoOTA.begin();
     Serial.println("[OTA] Ready. Hostname: " + BUS_ID + ".local");
-    // -----------------------
 
     // Callbacks
     net.setMessageCallback([](String payload) {
@@ -276,7 +297,7 @@ void setup() {
 }
 
 void loop() {
-    ArduinoOTA.handle(); // Check for OTA updates
+    ArduinoOTA.handle(); 
 
     // 1. Camera Request
     if (hasCameraRequest) {
@@ -311,8 +332,17 @@ void loop() {
             display.println("NEW AUDIO MSG");
             display.display();
             delay(3000);
+            
+            // Restore centered layout
             display.clearDisplay();
-            display.println(BUS_ID + " ONLINE");
+            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+            String topText = BUS_ID + " ONLINE";
+            display.setTextSize(1);
+            display.setCursor(getCenterX(topText, 1), 6);
+            display.print(topText);
+            String ipStr = "IP: " + WiFi.localIP().toString();
+            display.setCursor(getCenterX(ipStr, 1), 50);
+            display.print(ipStr);
             display.display();
         }
     }
@@ -347,9 +377,16 @@ void loop() {
             display.display();
             delay(5000);
             
+            // Restore centered layout
             display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println(BUS_ID + " ONLINE");
+            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+            String topText = BUS_ID + " ONLINE";
+            display.setTextSize(1);
+            display.setCursor(getCenterX(topText, 1), 6);
+            display.print(topText);
+            String ipStr = "IP: " + WiFi.localIP().toString();
+            display.setCursor(getCenterX(ipStr, 1), 50);
+            display.print(ipStr);
             display.display();
         }
     }
@@ -369,9 +406,16 @@ void loop() {
         gsm.makeAdminCall(adminCallNumber);
         
         if (oledOk) {
+            // Restore centered layout
             display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println(BUS_ID + " ONLINE");
+            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+            String topText = BUS_ID + " ONLINE";
+            display.setTextSize(1);
+            display.setCursor(getCenterX(topText, 1), 6);
+            display.print(topText);
+            String ipStr = "IP: " + WiFi.localIP().toString();
+            display.setCursor(getCenterX(ipStr, 1), 50);
+            display.print(ipStr);
             display.display();
         }
     }
@@ -469,11 +513,24 @@ void loop() {
         }
     }
     
-    // 8. Heartbeat
+    // 8. Heartbeat (CENTERED)
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
         Serial.printf("[Status] %s | WiFi: %s | OLED: %d\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk);
+        
+        if (oledOk) {
+            display.clearDisplay();
+            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+            String topText = BUS_ID + " ONLINE";
+            display.setTextSize(1);
+            display.setCursor(getCenterX(topText, 1), 6);
+            display.print(topText);
+            String ipStr = "IP: " + WiFi.localIP().toString();
+            display.setCursor(getCenterX(ipStr, 1), 50);
+            display.print(ipStr);
+            display.display();
+        }
     }
     
     delay(50);

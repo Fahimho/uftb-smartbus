@@ -102,4 +102,4 @@ def main():
     requests.post(f"{BACKEND_URL}/api/trips/end", json={"busId": BUS_ID})
 
 if __name__ == "__main__":
-    main()
+    main()   

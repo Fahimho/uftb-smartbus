@@ -2,55 +2,146 @@
 
 ResourceManager::ResourceManager() {
     currentOwner = "None";
-    spiMutex = xSemaphoreCreateMutex();
+    spiMutex = nullptr;
     mcpConnected = false;
 }
 
 void ResourceManager::begin() {
-    if (spiMutex == NULL) {
-        Serial.println("[FATAL] Could not create SPI Mutex!");
+
+    // 1. Initialize SPI mutex
+    if (spiMutex == nullptr) {
+        spiMutex = xSemaphoreCreateMutex();
+
+        if (spiMutex == nullptr) {
+            Serial.println("[FATAL] Could not create SPI Mutex!");
+        }
     }
-    
-    // Initialize MCP23008 at 0x20
+
+    // 2. Initialize I2C
+    Wire.begin(5, 6);
+    Wire.setClock(100000);
+
+    delay(100);
+
+    // 3. Initialize MCP23017
     if (mcp.begin_I2C(0x20)) {
+
         mcpConnected = true;
-        // GP5 is the RFID CS pin (Output)
+
+        Serial.println("[ResourceManager] MCP23017 initialized at 0x20");
+
+        // Emergency button
+        mcp.pinMode(0, INPUT_PULLUP);
+
+        // Navigation buttons
+        mcp.pinMode(1, INPUT_PULLUP);
+        mcp.pinMode(2, INPUT_PULLUP);
+        mcp.pinMode(3, INPUT_PULLUP);
+
+        // Buzzer
+        mcp.pinMode(4, OUTPUT);
+        mcp.digitalWrite(4, LOW);
+
+        // RFID Chip Select
         mcp.pinMode(5, OUTPUT);
-        mcp.digitalWrite(5, HIGH); // Default inactive
-        Serial.println("[OK] MCP23008 found. RFID CS mapped to GP5.");
+        mcp.digitalWrite(5, HIGH);
+
     } else {
+
         mcpConnected = false;
-        Serial.println("[WARNING] MCP23008 NOT found. RFID CS will fail.");
+
+        Serial.println("[ERROR] MCP23017 NOT found at 0x20!");
     }
+
+    Serial.println("[ResourceManager] Initialization complete.");
 }
 
 bool ResourceManager::isMcpConnected() {
     return mcpConnected;
 }
 
-void ResourceManager::setRfidCS(bool active) {
+// --------------------------------------------------
+// MCP23017 SAFE ACCESS
+// --------------------------------------------------
+
+void ResourceManager::pinModeMCP(uint8_t pin, uint8_t mode) {
+
     if (mcpConnected) {
-        // RFID CS is active LOW
-        mcp.digitalWrite(5, active ? LOW : HIGH);
+        mcp.pinMode(pin, mode);
     }
 }
 
-bool ResourceManager::acquireSPI(const char* requester) {
-    if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        currentOwner = requester;
+void ResourceManager::digitalWriteMCP(uint8_t pin, uint8_t value) {
+
+    if (mcpConnected) {
+        mcp.digitalWrite(pin, value);
+    }
+}
+
+bool ResourceManager::digitalReadMCP(uint8_t pin) {
+
+    if (mcpConnected) {
+        return mcp.digitalRead(pin) == HIGH;
+    }
+
+    return HIGH;
+}
+
+// --------------------------------------------------
+// RFID CHIP SELECT
+// --------------------------------------------------
+
+void ResourceManager::setRfidCS(bool active) {
+
+    if (!mcpConnected) {
+        return;
+    }
+
+    // Active LOW
+    mcp.digitalWrite(5, active ? LOW : HIGH);
+}
+
+// --------------------------------------------------
+// SPI RESOURCE MANAGEMENT
+// --------------------------------------------------
+
+bool ResourceManager::acquireSPI(const char* requester, uint32_t timeoutMs) {
+
+    if (spiMutex == nullptr) {
+        Serial.println("[ERROR] SPI mutex not initialized!");
+        return false;
+    }
+
+    if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+
+        currentOwner = String(requester);
+
         return true;
     }
-    Serial.printf("[WARN] Resource Manager: %s timed out waiting for SPI bus\n", requester);
+
+    Serial.printf(
+        "[WARN] %s timed out waiting for SPI bus.\n",
+        requester
+    );
+
     return false;
 }
 
 void ResourceManager::releaseSPI(const char* requester) {
-    if (currentOwner == requester) {
+
+    if (spiMutex == nullptr) {
+        return;
+    }
+
+    if (currentOwner.equals(String(requester))) {
+
         currentOwner = "None";
+
         xSemaphoreGive(spiMutex);
     }
 }
 
-const char* ResourceManager::getCurrentOwner() {
+String ResourceManager::getCurrentOwner() {
+
     return currentOwner;
 }
