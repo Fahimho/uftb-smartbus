@@ -3,6 +3,10 @@ import { getFirestore } from "firebase-admin/firestore";
 import "../firebase.ts";
 import { mqttClient } from "../index.ts";
 import { getStorage } from "firebase-admin/storage";
+import { spawn } from "child_process";
+import fs from "fs";
+import path from "path";
+import os from "os";
 
 const router = Router();
 const db = getFirestore();
@@ -48,7 +52,7 @@ router.post("/setup", async (req: Request, res: Response) => {
 // ==========================================
 router.get("/setup/:busId", async (req: Request, res: Response) => {
   try {
-    const busId = req.params.busId as string; // <-- FIXED TYPESCRIPT ERROR
+    const busId = req.params.busId as string;
     const doc = await db.collection("buses").doc(busId).get();
     if (!doc.exists) {
       res.json({ message: "Bus not configured yet" });
@@ -61,7 +65,7 @@ router.get("/setup/:busId", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// NEW: 3. Get ALL Buses
+// 3. Get ALL Buses
 // ==========================================
 router.get("/buses", async (req: Request, res: Response) => {
   try {
@@ -130,7 +134,6 @@ router.post("/end", async (req: Request, res: Response) => {
       endedAt: new Date().toISOString(),
     });
 
-    // BETTER DELETION: Use batch delete to ensure nothing is missed
     const historySnapshot = await db.collection("gpsHistory").where("busId", "==", busId).get();
     
     if (!historySnapshot.empty) {
@@ -182,15 +185,15 @@ router.post("/attendance", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 7. GPS Endpoint (Updated with IP)
+// 7. GPS Endpoint
 // ==========================================
 router.post("/gps", async (req: Request, res: Response) => {
   try {
-    const { busId, lat, lng, speed, status, ip } = req.body; // <-- ADD ip
+    const { busId, lat, lng, speed, status, ip } = req.body;
     await db.collection("buses").doc(busId).set({
       busId: busId,
-      lastIp: ip || "Unknown",            // <-- ADD THIS
-      lastIpUpdatedAt: new Date().toISOString(), // <-- ADD THIS
+      lastIp: ip || "Unknown",
+      lastIpUpdatedAt: new Date().toISOString(),
       lastLocation: {
         lat: Number(lat),
         lng: Number(lng),
@@ -259,7 +262,7 @@ router.post("/emergency/:id/resolve", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 11. Student Request (Publishes to MQTT)
+// 11. Student Request
 // ==========================================
 router.post("/request", async (req: Request, res: Response) => {
   try {
@@ -362,7 +365,7 @@ router.post("/photo/upload", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 15. Admin Sends Voice Message
+// 15. Admin Sends Voice Message (Broadcast)
 // ==========================================
 router.post("/audio/send", async (req: Request, res: Response) => {
   try {
@@ -385,7 +388,7 @@ router.post("/audio/send", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 16. Bus Uploads Audio to Admin
+// 16. Bus Uploads Audio to Admin (OLD - base64 WAV)
 // ==========================================
 router.post("/audio/upload", async (req: Request, res: Response) => {
   try {
@@ -408,7 +411,7 @@ router.post("/audio/upload", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 17. Delete a single photo (Firestore + Storage)
+// 17. Delete a single photo
 // ==========================================
 router.delete("/photo/:requestId", async (req: Request, res: Response) => {
   try {
@@ -419,9 +422,7 @@ router.delete("/photo/:requestId", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Photo not found" });
       return;
     }
-    // Delete from Firestore
     await docRef.delete();
-    // Delete from Storage
     const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
     const file = bucket.file(`photos/${requestId}.jpg`);
     await file.delete().catch(() => {
@@ -429,6 +430,114 @@ router.delete("/photo/:requestId", async (req: Request, res: Response) => {
     });
     res.status(200).json({ message: "Photo deleted successfully" });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// NEW: 18. Admin Requests Voice Recording from Bus
+// ==========================================
+router.post("/voice/request", async (req: Request, res: Response) => {
+  try {
+    const { busId } = req.body;
+    if (!busId) {
+      res.status(400).json({ error: "Missing busId" });
+      return;
+    }
+
+    const requestData = {
+      busId,
+      status: "PENDING",
+      requestedAt: new Date().toISOString(),
+    };
+    const docRef = await db.collection("voiceRequests").add(requestData);
+
+    const topic = `smartbus/${busId}/audio`;
+    mqttClient.publish(topic, JSON.stringify({
+      action: "RECORD",
+      requestId: docRef.id
+    }));
+
+    console.log(`[VOICE] Recording request sent to ${busId} (requestId: ${docRef.id})`);
+    res.status(201).json({ message: "Recording request sent to bus", requestId: docRef.id });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// NEW: 19. ESP32 Uploads Raw PCM, Backend Converts to MP3
+// ==========================================
+router.post("/voice/upload", async (req: Request, res: Response) => {
+  const tempPcmPath = path.join(os.tmpdir(), `pcm_${Date.now()}.pcm`);
+  const tempMp3Path = path.join(os.tmpdir(), `mp3_${Date.now()}.mp3`);
+
+  try {
+    const { busId, sampleRate } = req.query;
+    if (!busId) {
+      res.status(400).json({ error: "Missing busId" });
+      return;
+    }
+
+    // 1. Save raw PCM buffer to a temp file
+    fs.writeFileSync(tempPcmPath, req.body);
+    console.log(`[VOICE] Received ${req.body.length} bytes from ${busId}`);
+
+    // 2. Run FFmpeg to convert PCM -> MP3
+    const ffmpegPath = "ffmpeg"; // Ensure FFmpeg is in PATH
+    const ffmpegArgs = [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      "-f", "s16le",
+      "-ar", String(sampleRate || 16000),
+      "-ac", "1",
+      "-i", tempPcmPath,
+      "-af", "volume=18dB",
+      "-codec:a", "libmp3lame",
+      "-b:a", "64k",
+      tempMp3Path
+    ];
+
+    await new Promise<void>((resolve, reject) => {
+      const ffmpeg = spawn(ffmpegPath, ffmpegArgs);
+      let stderr = "";
+      ffmpeg.stderr.on("data", (data) => { stderr += data.toString(); });
+      ffmpeg.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`FFmpeg failed with code ${code}: ${stderr}`));
+      });
+    });
+
+    // 3. Upload MP3 to Firebase Storage
+    const bucket = getStorage().bucket("uftb-smartbus-dev.appspot.com");
+    const mp3Buffer = fs.readFileSync(tempMp3Path);
+    const storagePath = `voice-inbox/${busId}-${Date.now()}.mp3`;
+    const file = bucket.file(storagePath);
+    await file.save(mp3Buffer, { metadata: { contentType: "audio/mpeg" } });
+
+    // 4. Save metadata to Firestore
+    const duration = Math.round(req.body.length / 2 / (Number(sampleRate) || 16000));
+    const docRef = await db.collection("voiceRequests").add({
+      busId,
+      status: "STORED",
+      storagePath,
+      durationSeconds: duration,
+      sizeBytes: mp3Buffer.length,
+      uploadedAt: new Date().toISOString(),
+    });
+
+    // Cleanup temp files
+    fs.unlinkSync(tempPcmPath);
+    fs.unlinkSync(tempMp3Path);
+
+    console.log(`[VOICE] Stored MP3 for ${busId} (${mp3Buffer.length} bytes, ${duration}s)`);
+    res.status(201).json({ message: "Voice message stored", voiceId: docRef.id });
+  } catch (error: any) {
+    // Cleanup on error
+    if (fs.existsSync(tempPcmPath)) fs.unlinkSync(tempPcmPath);
+    if (fs.existsSync(tempMp3Path)) fs.unlinkSync(tempMp3Path);
+    console.error("[VOICE] Upload failed:", error.message);
     res.status(500).json({ error: error.message });
   }
 });

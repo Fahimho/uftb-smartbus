@@ -64,7 +64,12 @@ export default function AdminDashboard() {
   const [newStaffEmail, setNewStaffEmail] = useState("");
   const [newStaffPassword, setNewStaffPassword] = useState("");
   const [newStaffBusId, setNewStaffBusId] = useState("");
-  const [showStaffPassword, setShowStaffPassword] = useState(false); // <-- NEW
+  const [showStaffPassword, setShowStaffPassword] = useState(false);
+
+  // Voice Request State (NEW)
+  const [voiceRequests, setVoiceRequests] = useState<any[]>([]);
+  const [listeningForBus, setListeningForBus] = useState(false);
+  const [voiceUrls, setVoiceUrls] = useState<Record<string, string>>({});
 
   // State for Admin viewing trip attendance
   const [viewingTripId, setViewingTripId] = useState<string | null>(null);
@@ -116,7 +121,52 @@ export default function AdminDashboard() {
     return () => unsub();
   }, []);
 
-  // 5. Fetch ALL Buses on mount
+  // 5. Listen to Voice Requests (NEW)
+  useEffect(() => {
+    if (!audioBusId) return;
+    const q = query(
+      collection(db, "voiceRequests"),
+      where("busId", "==", audioBusId),
+      where("status", "==", "STORED")
+    );
+    const unsub = onSnapshot(q, async (snapshot) => {
+      const sorted = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+      setVoiceRequests(sorted);
+      for (const v of sorted) {
+        try {
+          const url = await getDownloadURL(ref(storage, v.storagePath));
+          setVoiceUrls(prev => ({ ...prev, [v.id]: url }));
+        } catch (e) { console.warn(`Could not load voice ${v.id}`, e); }
+      }
+    });
+    return () => unsub();
+  }, [audioBusId]);
+
+  // 6. Listen to voice request status changes (for timeout)
+  useEffect(() => {
+    if (!listeningForBus || !audioBusId) return;
+    const q = query(
+      collection(db, "voiceRequests"),
+      where("busId", "==", audioBusId),
+      where("status", "==", "PENDING")
+    );
+    const unsub = onSnapshot(q, (snapshot) => {
+      if (snapshot.empty && listeningForBus) {
+        // Nothing pending; check if a STORED one just appeared
+        // Handled by voiceRequests listener
+      }
+    });
+    const timer = setTimeout(() => {
+      if (listeningForBus) {
+        toast.error("Bus did not respond in 30 seconds. Check if the bus is online.", { id: "listen" });
+        setListeningForBus(false);
+      }
+    }, 30000);
+    return () => { unsub(); clearTimeout(timer); };
+  }, [listeningForBus, audioBusId]);
+
+  // 7. Fetch ALL Buses on mount
   const fetchAllBuses = () => {
     fetch("http://localhost:5000/api/trips/buses")
       .then(res => res.json())
@@ -133,7 +183,7 @@ export default function AdminDashboard() {
     fetchAllBuses();
   }, []);
 
-  // 6. Load Fleet Setup when selectedBusId changes
+  // 8. Load Fleet Setup when selectedBusId changes
   useEffect(() => {
     if (!selectedBusId) return;
     
@@ -197,7 +247,6 @@ export default function AdminDashboard() {
     const loading = toast.loading("Creating staff account...");
     
     try {
-      // 1. Get the current Admin's token from Firebase Auth directly
       const token = await auth.currentUser?.getIdToken();
       
       if (!token) {
@@ -205,7 +254,6 @@ export default function AdminDashboard() {
         return;
       }
 
-      // 2. Call the secure backend route
       const res = await fetch("http://localhost:5000/api/auth/register-staff", {
         method: "POST",
         headers: { 
@@ -237,6 +285,7 @@ export default function AdminDashboard() {
       toast.error(`Error: ${err.message}`, { id: loading });
     }
   };
+
   // Delete Operator (Staff)
   const handleDeleteStaff = async (staffId: string, staffName: string) => {
     if (!window.confirm(`Are you sure you want to delete ${staffName}?`)) return;
@@ -293,7 +342,32 @@ export default function AdminDashboard() {
     return () => unsub();
   };
 
-  // Audio recording functions
+  // NEW: Handle Listen to Bus
+  const handleListenToBus = async () => {
+    if (!audioBusId) return toast.error("Select a bus first!");
+    setListeningForBus(true);
+    toast.loading("Recording request sent. Waiting for bus...", { id: "listen" });
+
+    try {
+      const res = await fetch("http://localhost:5000/api/trips/voice/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ busId: audioBusId })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(`Recording request sent to ${getBusName(audioBusId)}. Waiting...`, { id: "listen", duration: 3000 });
+      } else {
+        toast.error(data.error || "Failed to send request", { id: "listen" });
+        setListeningForBus(false);
+      }
+    } catch (err) {
+      toast.error("Network error", { id: "listen" });
+      setListeningForBus(false);
+    }
+  };
+
+  // Audio recording functions (Admin → Bus broadcast)
   const startRecording = async () => {
     if (!audioBusId) return toast.error("No bus selected for audio");
     try {
@@ -343,6 +417,9 @@ export default function AdminDashboard() {
     const bus = allBuses.find(b => b.busId === busId);
     return bus ? bus.busName || "Unnamed" : busId;
   };
+
+  // Helper to get bus name from bus object or id
+  const getBusNameById = (busId: string) => getBusName(busId);
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -737,7 +814,7 @@ export default function AdminDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* NEW: STAFF MANAGEMENT TAB */}
+      {/* STAFF MANAGEMENT TAB */}
       {/* ========================================== */}
       {activeTab === "staff" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -753,7 +830,6 @@ export default function AdminDashboard() {
               <input placeholder="Full Name" value={newStaffName} onChange={e => setNewStaffName(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} required />
               <input type="email" placeholder="Email Address" value={newStaffEmail} onChange={e => setNewStaffEmail(e.target.value)} style={{ padding: 10, borderRadius: 6, border: "1px solid #cbd5e1" }} required />
               
-              {/* PASSWORD FIELD WITH EYE ICON */}
               <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
                 <input 
                   type={showStaffPassword ? "text" : "password"} 
@@ -886,14 +962,14 @@ export default function AdminDashboard() {
       )}
 
       {/* ========================================== */}
-      {/* AUDIO TAB */}
+      {/* AUDIO TAB (Voice Messages) */}
       {/* ========================================== */}
       {activeTab === "audio" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12 }}>
           <h2 style={{ marginTop: 0 }}>Voice Messages</h2>
-          <p>Record a message to broadcast to the bus. The bus will beep 3 times.</p>
+          <p>Record a message to broadcast to the bus, or request a live recording from the bus.</p>
           
-          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 24 }}>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 24, flexWrap: "wrap" }}>
             <select 
               value={audioBusId} 
               onChange={(e) => setAudioBusId(e.target.value)}
@@ -904,12 +980,55 @@ export default function AdminDashboard() {
 
             {!isRecording ? (
               <button onClick={startRecording} style={{ padding: "12px 24px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}>
-                <Mic size={18} /> Start Recording
+                <Mic size={18} /> Start Recording (Broadcast)
               </button>
             ) : (
               <button onClick={stopRecording} style={{ padding: "12px 24px", background: "#10b981", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}>
                 <Square size={18} /> Stop & Send
               </button>
+            )}
+
+            <button 
+              onClick={handleListenToBus}
+              disabled={listeningForBus}
+              style={{ padding: "12px 24px", background: listeningForBus ? "#cbd5e1" : "#8b5cf6", color: "white", border: "none", borderRadius: 8, cursor: listeningForBus ? "not-allowed" : "pointer", fontWeight: "bold", display: "flex", alignItems: "center", gap: 8 }}
+            >
+              🎧 {listeningForBus ? "Listening..." : "Listen to Bus"}
+            </button>
+          </div>
+
+          {/* Voice Inbox */}
+          <div style={{ marginTop: 32 }}>
+            <h3>🎧 Voice Inbox — {getBusName(audioBusId)}</h3>
+            {voiceRequests.length === 0 ? (
+              <p style={{ color: "#64748b" }}>No recordings yet. Click "Listen to Bus" to request one.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {voiceRequests.map((v) => (
+                  <div key={v.id} style={{ padding: 16, border: "1px solid #e2e8f0", borderRadius: 8, background: "#f8fafc" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <strong>Recording from {getBusName(v.busId)}</strong>
+                      <span style={{ color: "#64748b", fontSize: 14 }}>{new Date(v.uploadedAt).toLocaleString()} · {v.durationSeconds}s</span>
+                    </div>
+                    {voiceUrls[v.id] && (
+                      <audio controls src={voiceUrls[v.id]} style={{ width: "100%" }} />
+                    )}
+                    {voiceUrls[v.id] && (
+                      <button 
+                        onClick={() => {
+                          const a = document.createElement("a");
+                          a.href = voiceUrls[v.id];
+                          a.download = `${getBusName(v.busId)}_${v.id}.mp3`;
+                          a.click();
+                        }}
+                        style={{ marginTop: 8, padding: "6px 12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+                      >
+                        ⬇ Download
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
@@ -1076,7 +1195,6 @@ function PhotoGallery({ selectedBusId, busName }: { selectedBusId: string, busNa
 
   return (
     <div>
-      {/* Main Viewer */}
       <div style={{ position: "relative", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, background: "#f8fafc" }}>
         {currentUrl ? (
           <img src={currentUrl} alt="Captured" style={{ maxWidth: "100%", maxHeight: 500, borderRadius: 8, display: "block", margin: "0 auto" }} />
@@ -1115,7 +1233,6 @@ function PhotoGallery({ selectedBusId, busName }: { selectedBusId: string, busNa
         </div>
       </div>
 
-      {/* Thumbnails */}
       <div style={{ display: "flex", gap: 8, marginTop: 16, overflowX: "auto", paddingBottom: 8 }}>
         {photos.map((photo, i) => (
           <div
@@ -1132,7 +1249,6 @@ function PhotoGallery({ selectedBusId, busName }: { selectedBusId: string, busNa
         ))}
       </div>
 
-      {/* Bulk Actions */}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
         <button onClick={handleReset} style={{ padding: "10px 20px", background: "#e2e8f0", color: "#334155", border: "none", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontWeight: "bold" }}>
           <RotateCcw size={16} /> Reset

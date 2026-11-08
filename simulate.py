@@ -5,7 +5,7 @@ import sys
 
 # --- CONFIGURATION ---
 BACKEND_URL = "http://localhost:5000"
-BUS_ID = "BUS-02" 
+BUS_ID = "BUS-01" 
 
 # Start and End points
 START_LAT, START_LNG = 23.8759, 90.3795

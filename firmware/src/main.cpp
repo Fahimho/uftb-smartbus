@@ -7,6 +7,7 @@
 #include <WiFiManager.h>
 #include <ArduinoOTA.h>
 #include <WebServer.h>
+#include "driver/i2s.h"
 #include "ResourceManager.h"
 #include "RFIDManager.h"
 #include "SDManager.h"
@@ -23,6 +24,14 @@
 #define GPS_RX 44
 #define GSM_RX 1
 #define GSM_TX 2
+
+// --- AUDIO PIN DEFINITIONS (PDM Mic) ---
+#define I2S_PDM_CLK 42
+#define I2S_PDM_DATA 41
+#define SAMPLE_RATE 16000
+#define RECORD_SECONDS 20
+#define TOTAL_SAMPLES (SAMPLE_RATE * RECORD_SECONDS)
+#define BYTES_PER_SAMPLE 2
 
 // --- WIFI & BACKEND CONFIGURATION ---
 const char* BACKEND_URL = "http://192.168.0.102:5000"; 
@@ -58,7 +67,7 @@ int targetBeeps = 0;
 unsigned long lastBeepTime = 0;
 int beepDuration = 0;
 int beepGap = 0;
-int currentBeepPhase = 0; // 0 = idle, 1 = beeping
+int currentBeepPhase = 0;
 
 // --- MQTT/EVENT STATE ---
 volatile bool hasNewMqttRequest = false;
@@ -76,6 +85,14 @@ bool emergencyTriggered = false;
 bool emergencyAlarmActive = false;
 unsigned long emergencyAlarmStart = 0;
 
+// --- AUDIO RECORDING STATE ---
+enum AudioState { AUDIO_IDLE, AUDIO_RECORDING, AUDIO_UPLOADING };
+AudioState audioState = AUDIO_IDLE;
+int16_t* audioBuffer = nullptr;
+size_t samplesCaptured = 0;
+unsigned long audioStateStart = 0;
+unsigned long lastOledProgressUpdate = 0;
+
 // --- HELPER: CENTER TEXT ---
 int getCenterX(String text, int textSize) {
     int charWidth = 6 * textSize;
@@ -83,7 +100,6 @@ int getCenterX(String text, int textSize) {
     return (128 - textWidth) / 2;
 }
 
-// --- HELPER: DRAW MAIN SCREEN ---
 void drawMainScreen() {
     if (!oledOk) return;
     display.clearDisplay();
@@ -101,7 +117,6 @@ void drawMainScreen() {
     oledShowingTemp = false;
 }
 
-// --- HELPER: SHOW TEMP MESSAGE ---
 void showTempMessage(String line1, String line2, int durationMs) {
     if (!oledOk) return;
     display.clearDisplay();
@@ -116,7 +131,6 @@ void showTempMessage(String line1, String line2, int durationMs) {
     lastOledActivity = millis();
 }
 
-// --- HELPER: WAKE / SLEEP ---
 void wakeOled() {
     if (!oledOk) return;
     display.ssd1306_command(SSD1306_DISPLAYON);
@@ -136,33 +150,27 @@ void registerActivity() {
     if (!oledAwake) wakeOled();
 }
 
-// --- HELPER: NON-BLOCKING BEEPS (STATE MACHINE) ---
 void startBeeps(int count, int duration, int gap) {
     beepCount = 0;
     targetBeeps = count;
     beepDuration = duration;
     beepGap = gap;
-    currentBeepPhase = 0; // Start with OFF phase
+    currentBeepPhase = 0;
     lastBeepTime = millis();
 }
 
 void updateBeeps() {
     if (beepCount >= targetBeeps) return;
-    
     unsigned long now = millis();
     unsigned long elapsed = now - lastBeepTime;
-
     if (currentBeepPhase == 0) {
-        // OFF phase (gap)
         if (elapsed >= beepGap) {
-            // Turn ON
             inputs.buzz(beepDuration);
             currentBeepPhase = 1;
             lastBeepTime = now;
             beepCount++;
         }
     } else {
-        // ON phase (already beeped, wait for gap)
         if (elapsed >= beepGap) {
             currentBeepPhase = 0;
             lastBeepTime = now;
@@ -170,9 +178,135 @@ void updateBeeps() {
     }
 }
 
+// --- NEW: I2S PDM INITIALIZATION (Classic API) ---
+void initPDM() {
+    Serial.println("[AUDIO] Initializing PDM microphone (driver/i2s.h)...");
+
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 1024,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    if (err != ESP_OK) {
+        Serial.printf("[ERROR] i2s_driver_install failed: %d\n", err);
+        return;
+    }
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_PIN_NO_CHANGE,
+        .ws_io_num = I2S_PDM_CLK,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_PDM_DATA
+    };
+
+    err = i2s_set_pin(I2S_NUM_0, &pin_config);
+    if (err != ESP_OK) {
+        Serial.printf("[ERROR] i2s_set_pin failed: %d\n", err);
+        return;
+    }
+
+    Serial.println("[OK] PDM microphone initialized.");
+}
+
+// --- NEW: SEND AUDIO TO BACKEND ---
+bool uploadAudioToBackend(uint8_t* data, size_t length) {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    HTTPClient http;
+    String url = String(BACKEND_URL) + "/api/trips/voice/upload?busId=" + BUS_ID + "&sampleRate=" + String(SAMPLE_RATE);
+    http.begin(url);
+    http.addHeader("Content-Type", "application/octet-stream");
+    http.setTimeout(20000);
+    int code = http.POST(data, length);
+    http.end();
+    Serial.printf("[AUDIO] Upload response: %d\n", code);
+    return (code >= 200 && code < 300);
+}
+
+// --- NEW: NON-BLOCKING AUDIO RECORDING STATE MACHINE ---
+void updateAudioRecording() {
+    if (audioState == AUDIO_IDLE) return;
+
+    unsigned long now = millis();
+    unsigned long elapsed = now - audioStateStart;
+
+    if (audioState == AUDIO_RECORDING) {
+        size_t bytesRead = 0;
+        size_t bytesToRead = (TOTAL_SAMPLES - samplesCaptured) * BYTES_PER_SAMPLE;
+        if (bytesToRead > 2048) bytesToRead = 2048;
+
+        esp_err_t result = i2s_read(I2S_NUM_0, (void*)((uint8_t*)audioBuffer + samplesCaptured * BYTES_PER_SAMPLE), bytesToRead, &bytesRead, portMAX_DELAY);
+
+        if (result == ESP_OK && bytesRead > 0) {
+            samplesCaptured += (bytesRead / BYTES_PER_SAMPLE);
+        }
+
+        // OLED progress update once per second
+        if (oledOk && now - lastOledProgressUpdate > 1000) {
+            lastOledProgressUpdate = now;
+            int progress = (samplesCaptured * 100) / TOTAL_SAMPLES;
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.setTextSize(1);
+            display.println("RECORDING...");
+            display.print("Progress: ");
+            display.print(progress);
+            display.println("%");
+            display.display();
+        }
+
+        if (samplesCaptured >= TOTAL_SAMPLES || elapsed > (RECORD_SECONDS * 1000 + 3000)) {
+            audioState = AUDIO_UPLOADING;
+            audioStateStart = millis();
+            if (oledOk) {
+                display.clearDisplay();
+                display.setCursor(0, 0);
+                display.println("UPLOADING...");
+                display.display();
+            }
+        }
+    } 
+    else if (audioState == AUDIO_UPLOADING) {
+        bool success = uploadAudioToBackend((uint8_t*)audioBuffer, TOTAL_SAMPLES * BYTES_PER_SAMPLE);
+        if (success) {
+            showTempMessage("AUDIO SENT!", "Success", 3000);
+        } else {
+            showTempMessage("UPLOAD FAILED", "Check WiFi", 3000);
+        }
+        audioState = AUDIO_IDLE;
+        free(audioBuffer);
+        audioBuffer = nullptr;
+        samplesCaptured = 0;
+    }
+}
+
+void startAudioRecording() {
+    if (audioState != AUDIO_IDLE) return;
+    size_t totalBytes = TOTAL_SAMPLES * BYTES_PER_SAMPLE;
+    audioBuffer = (int16_t*)ps_malloc(totalBytes);
+    if (audioBuffer == nullptr) {
+        showTempMessage("NO PSRAM", "Cannot record", 3000);
+        return;
+    }
+    samplesCaptured = 0;
+    audioState = AUDIO_RECORDING;
+    audioStateStart = millis();
+    lastOledProgressUpdate = millis();
+    Serial.println("[AUDIO] Recording started (20 seconds)...");
+}
+
 void setup() {
     Serial.begin(115200);
-    delay(1000); // Safe: boot only
+    delay(1000);
     Serial.println("\n========================================");
     Serial.println("UFTB SmartBus - FULL SYSTEM");
     Serial.println("========================================");
@@ -200,13 +334,12 @@ void setup() {
 
     inputs.begin();
 
-    // Factory Reset
     if (inputs.isSelectPressed()) {
         Serial.println("[FACTORY RESET] Wiping memory...");
         preferences.begin("smartbus", false);
         preferences.clear();
         preferences.end();
-        delay(2000); // Safe: about to reboot
+        delay(2000);
         ESP.restart();
     }
 
@@ -249,7 +382,7 @@ void setup() {
                 preferences.putString("busId", newId);
                 BUS_ID = newId;
                 server.send(200, "text/html", "<h1 style='color:green;'>Success! Rebooting...</h1>");
-                delay(3000); // Safe: about to reboot
+                delay(3000);
                 ESP.restart();
             } else {
                 server.send(400, "text/plain", "Missing busId");
@@ -259,14 +392,14 @@ void setup() {
         server.begin();
         while (true) { 
             server.handleClient(); 
-            delay(10); // Safe: cooperative yield in portal mode
+            delay(10);
         }
     } else {
         Serial.println("[WiFi] Connecting to saved network...");
         WiFi.begin(); 
         int attempts = 0;
         while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-            delay(500); // Safe: boot only
+            delay(500); 
             Serial.print(".");
             attempts++;
         }
@@ -285,15 +418,18 @@ void setup() {
 
     Wire.setClock(100000); 
     SPI.begin(7, 8, 9, SD_CS);
-    delay(500); // Safe: boot only
+    delay(500);
     if (rfid.begin()) Serial.println("[OK] MFRC522 RFID found.");
     else Serial.println("[ERROR] MFRC522 RFID NOT found.");
-    delay(500); // Safe: boot only
+    delay(500);
     if (sd.begin()) Serial.println("[OK] microSD Card found.");
     else Serial.println("[ERROR] microSD Card NOT found.");
-    delay(500); // Safe: boot only
+    delay(500);
     if (camera.begin()) Serial.println("[OK] Camera initialized.");
     else Serial.println("[ERROR] Camera failed.");
+
+    // --- INITIALIZE AUDIO ---
+    initPDM();
 
     gsm.begin(); 
     net.setBusId(BUS_ID);
@@ -344,7 +480,6 @@ void setup() {
         int start = payload.indexOf("[") + 1;
         int end = payload.indexOf("]");
         String list = payload.substring(start, end);
-        
         String nums[5];
         int count = 0;
         int quoteStart = 0;
@@ -367,27 +502,23 @@ void setup() {
 void loop() {
     ArduinoOTA.handle(); 
 
-    // --- OLED SLEEP / WAKE ---
-    if (oledOk && oledAwake && !oledShowingTemp) {
+    if (oledOk && oledAwake && !oledShowingTemp && audioState == AUDIO_IDLE) {
         if (millis() - lastOledActivity > OLED_TIMEOUT_MS) {
             sleepOled();
         }
     }
     
-    // Restore main screen if temp message expired
     if (oledOk && oledShowingTemp && millis() > oledRestoreTime) {
         drawMainScreen();
     }
 
-    // --- WAKE ON BUTTON PRESS ---
     if (inputs.isUpPressed() || inputs.isDownPressed() || inputs.isSelectPressed()) {
         registerActivity();
     }
 
-    // --- NON-BLOCKING BEEP UPDATE ---
     updateBeeps();
+    updateAudioRecording();
 
-    // --- CAMERA REQUEST ---
     if (hasCameraRequest) {
         hasCameraRequest = false;
         String base64Image = camera.captureBase64();
@@ -396,18 +527,15 @@ void loop() {
         }
     }
 
-    // --- AUDIO REQUEST ---
     if (hasAudioRequest) {
         hasAudioRequest = false;
-        startBeeps(3, 100, 200); // 3 short beeps
-        showTempMessage("NEW AUDIO MSG", "", 3000);
+        startBeeps(3, 100, 200);
+        startAudioRecording();
     }
 
-    // --- STUDENT STOP REQUEST ---
     if (hasNewMqttRequest) {
         hasNewMqttRequest = false;
-        startBeeps(5, 1000, 1000); // 5 long beeps
-        
+        startBeeps(5, 1000, 1000);
         if (mqttRequestMessage.indexOf(" te achi") > 0) {
             showTempMessage("NEW REQUEST:", mqttRequestMessage, 5000);
         } else {
@@ -415,7 +543,6 @@ void loop() {
         }
     }
 
-    // --- ADMIN CALL REQUEST ---
     if (hasAdminCallRequest) {
         hasAdminCallRequest = false;
         showTempMessage("ADMIN CALLING...", "", 2000);
@@ -424,7 +551,6 @@ void loop() {
     
     net.loopMQTT();
 
-    // --- RFID SCAN ---
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
         showTempMessage("BOARDING...", "UID: " + uid, 2000);
@@ -433,7 +559,6 @@ void loop() {
         }
     }
     
-    // --- EMERGENCY BUTTON ---
     if (inputs.isEmergencyPressed()) {
         if (!emergencyHoldActive) {
             emergencyHoldActive = true;
@@ -444,7 +569,6 @@ void loop() {
             emergencyAlarmActive = true;
             emergencyAlarmStart = millis();
             
-            // Show emergency screen
             if (oledOk) {
                 registerActivity();
                 display.clearDisplay();
@@ -456,7 +580,6 @@ void loop() {
                 oledRestoreTime = millis() + 5000;
             }
             
-            // Trigger everything
             gps.update();
             String latStr = gps.hasFix() ? String(gps.getLat(), 6) : "0.0";
             String lngStr = gps.hasFix() ? String(gps.getLng(), 6) : "0.0";
@@ -475,18 +598,16 @@ void loop() {
         emergencyTriggered = false;
     }
 
-    // Emergency alarm beep (non-blocking)
     if (emergencyAlarmActive) {
         if (millis() - emergencyAlarmStart < 2000) {
-            inputs.buzz(100); // Short beeps, called repeatedly
+            inputs.buzz(100);
         } else {
             emergencyAlarmActive = false;
         }
     }
     
-    // --- GPS UPDATES ---
     static unsigned long lastGps = 0;
-    if (millis() - lastGps > 5000) {
+    if (millis() - lastGps > 5000 && audioState == AUDIO_IDLE) {
         lastGps = millis();
         gps.update();
         if (gps.hasFix() && net.isConnected()) {
@@ -494,14 +615,12 @@ void loop() {
         }
     }
     
-    // --- HEARTBEAT ---
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
         Serial.printf("[Status] %s | WiFi: %s | OLED: %d\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk);
     }
     
-    // --- NON-BLOCKING YIELD ---
     yield();
     vTaskDelay(1);
 }

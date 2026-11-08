@@ -23,6 +23,8 @@ mqttClient.on("error", (err) => {
   console.error("❌ [MQTT] Error:", err.message);
 });
 
+// Add this BEFORE  other app.use() lines
+app.use("/api/trips/voice/upload", express.raw({ type: "application/octet-stream", limit: "50mb" }));
 app.use(cors());
 app.use(express.json());
 
