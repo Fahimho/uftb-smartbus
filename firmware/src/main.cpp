@@ -45,45 +45,140 @@ Sim800Manager gsm(GSM_RX, GSM_TX);
 
 bool oledOk = false;
 
-// MQTT Request Variables
+// --- NON-BLOCKING OLED STATE ---
+unsigned long lastOledActivity = 0;
+const unsigned long OLED_TIMEOUT_MS = 20000;
+bool oledAwake = true;
+unsigned long oledRestoreTime = 0;
+bool oledShowingTemp = false;
+
+// --- NON-BLOCKING BEEP STATE ---
+int beepCount = 0;
+int targetBeeps = 0;
+unsigned long lastBeepTime = 0;
+int beepDuration = 0;
+int beepGap = 0;
+int currentBeepPhase = 0; // 0 = idle, 1 = beeping
+
+// --- MQTT/EVENT STATE ---
 volatile bool hasNewMqttRequest = false;
 String mqttRequestMessage = "";
-
-// Camera Request Variables
 volatile bool hasCameraRequest = false; 
 String cameraRequestId = "";
-
-// Audio Request Variables
 volatile bool hasAudioRequest = false;
-String audioRequestMessage = "";    
-
-// Admin Call Request Variables
 volatile bool hasAdminCallRequest = false;
 String adminCallNumber = "";
 
-// Emergency Button Variables
+// --- EMERGENCY STATE ---
 unsigned long emergencyHoldStart = 0;
 bool emergencyHoldActive = false;
 bool emergencyTriggered = false;
+bool emergencyAlarmActive = false;
+unsigned long emergencyAlarmStart = 0;
 
-// --- Helper to center text ---
+// --- HELPER: CENTER TEXT ---
 int getCenterX(String text, int textSize) {
     int charWidth = 6 * textSize;
     int textWidth = text.length() * charWidth;
     return (128 - textWidth) / 2;
 }
 
+// --- HELPER: DRAW MAIN SCREEN ---
+void drawMainScreen() {
+    if (!oledOk) return;
+    display.clearDisplay();
+    display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
+    String topText = BUS_ID + " ONLINE";
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(getCenterX(topText, 1), 6);
+    display.print(topText);
+    String ipStr = "IP: " + WiFi.localIP().toString();
+    display.setCursor(getCenterX(ipStr, 1), 50);
+    display.print(ipStr);
+    display.display();
+    lastOledActivity = millis();
+    oledShowingTemp = false;
+}
+
+// --- HELPER: SHOW TEMP MESSAGE ---
+void showTempMessage(String line1, String line2, int durationMs) {
+    if (!oledOk) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(line1);
+    if (line2 != "") display.println(line2);
+    display.display();
+    oledRestoreTime = millis() + durationMs;
+    oledShowingTemp = true;
+    lastOledActivity = millis();
+}
+
+// --- HELPER: WAKE / SLEEP ---
+void wakeOled() {
+    if (!oledOk) return;
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    oledAwake = true;
+    lastOledActivity = millis();
+    drawMainScreen();
+}
+
+void sleepOled() {
+    if (!oledOk) return;
+    display.ssd1306_command(SSD1306_DISPLAYOFF);
+    oledAwake = false;
+}
+
+void registerActivity() {
+    lastOledActivity = millis();
+    if (!oledAwake) wakeOled();
+}
+
+// --- HELPER: NON-BLOCKING BEEPS (STATE MACHINE) ---
+void startBeeps(int count, int duration, int gap) {
+    beepCount = 0;
+    targetBeeps = count;
+    beepDuration = duration;
+    beepGap = gap;
+    currentBeepPhase = 0; // Start with OFF phase
+    lastBeepTime = millis();
+}
+
+void updateBeeps() {
+    if (beepCount >= targetBeeps) return;
+    
+    unsigned long now = millis();
+    unsigned long elapsed = now - lastBeepTime;
+
+    if (currentBeepPhase == 0) {
+        // OFF phase (gap)
+        if (elapsed >= beepGap) {
+            // Turn ON
+            inputs.buzz(beepDuration);
+            currentBeepPhase = 1;
+            lastBeepTime = now;
+            beepCount++;
+        }
+    } else {
+        // ON phase (already beeped, wait for gap)
+        if (elapsed >= beepGap) {
+            currentBeepPhase = 0;
+            lastBeepTime = now;
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(1000); // Safe: boot only
     Serial.println("\n========================================");
     Serial.println("UFTB SmartBus - FULL SYSTEM");
     Serial.println("========================================");
 
-    // 1. INITIALIZE RESOURCE MANAGER
     resMgr.begin();
 
-    // 2. INITIALIZE OLED
     if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         oledOk = true;
         Serial.println("[OK] OLED found at 0x3C");
@@ -91,7 +186,7 @@ void setup() {
         oledOk = true;
         Serial.println("[OK] OLED found at 0x3D");
     } else {
-        Serial.println("[ERROR] OLED NOT found at 0x3C or 0x3D");
+        Serial.println("[ERROR] OLED NOT found");
     }
 
     if (oledOk) {
@@ -103,20 +198,18 @@ void setup() {
         display.display();
     }
 
-    // 3. INIT INPUTS
     inputs.begin();
 
-    // 4. CHECK FOR FACTORY RESET
+    // Factory Reset
     if (inputs.isSelectPressed()) {
         Serial.println("[FACTORY RESET] Wiping memory...");
         preferences.begin("smartbus", false);
         preferences.clear();
         preferences.end();
-        delay(2000);
+        delay(2000); // Safe: about to reboot
         ESP.restart();
     }
 
-    // 5. LOAD BUS ID
     preferences.begin("smartbus", false);
     BUS_ID = preferences.getString("busId", "");
     preferences.end();
@@ -156,7 +249,7 @@ void setup() {
                 preferences.putString("busId", newId);
                 BUS_ID = newId;
                 server.send(200, "text/html", "<h1 style='color:green;'>Success! Rebooting...</h1>");
-                delay(3000);
+                delay(3000); // Safe: about to reboot
                 ESP.restart();
             } else {
                 server.send(400, "text/plain", "Missing busId");
@@ -164,13 +257,17 @@ void setup() {
         });
 
         server.begin();
-        while (true) { server.handleClient(); delay(10); }
+        while (true) { 
+            server.handleClient(); 
+            delay(10); // Safe: cooperative yield in portal mode
+        }
     } else {
         Serial.println("[WiFi] Connecting to saved network...");
         WiFi.begin(); 
         int attempts = 0;
         while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-            delay(500); Serial.print(".");
+            delay(500); // Safe: boot only
+            Serial.print(".");
             attempts++;
         }
         Serial.println();
@@ -182,52 +279,26 @@ void setup() {
         }
     }
 
-    // --- UPDATE OLED HERE (SINGLE LINE BOX + IP) ---
-    if (oledOk) {
-        display.clearDisplay();
-        
-        // Draw the top box
-        display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
-        
-        // "BUS-01 ONLINE" Centered in the top box
-        String topText = BUS_ID + " ONLINE";
-        display.setTextSize(1);
-        display.setCursor(getCenterX(topText, 1), 6); // Y=6 centers it vertically in a 20px box
-        display.print(topText);
-        
-        // IP Address centered at the bottom
-        String ipStr = "IP: " + WiFi.localIP().toString();
-        display.setCursor(getCenterX(ipStr, 1), 50);
-        display.print(ipStr);
-        
-        display.display();
-    }
-    // -------------------------------------------------
+    drawMainScreen();
 
     Serial.println("[SETUP] Operating as: " + BUS_ID);
 
-    // 6. INITIALIZE OTHER HARDWARE
     Wire.setClock(100000); 
-
     SPI.begin(7, 8, 9, SD_CS);
-    delay(500);
+    delay(500); // Safe: boot only
     if (rfid.begin()) Serial.println("[OK] MFRC522 RFID found.");
     else Serial.println("[ERROR] MFRC522 RFID NOT found.");
-    
-    delay(500);
+    delay(500); // Safe: boot only
     if (sd.begin()) Serial.println("[OK] microSD Card found.");
     else Serial.println("[ERROR] microSD Card NOT found.");
-    
-    delay(500);
+    delay(500); // Safe: boot only
     if (camera.begin()) Serial.println("[OK] Camera initialized.");
     else Serial.println("[ERROR] Camera failed.");
 
     gsm.begin(); 
-    
     net.setBusId(BUS_ID);
     net.begin();
     
-    // --- OTA Setup ---
     ArduinoOTA.setHostname(BUS_ID.c_str()); 
     ArduinoOTA.setPassword("uftbsmartbus"); 
     ArduinoOTA.onStart([]() { Serial.println("[OTA] Update Starting..."); });
@@ -241,13 +312,12 @@ void setup() {
     ArduinoOTA.begin();
     Serial.println("[OTA] Ready. Hostname: " + BUS_ID + ".local");
 
-    // Callbacks
     net.setMessageCallback([](String payload) {
-        Serial.println("[MQTT RECEIVED] " + payload);
         int start = payload.indexOf(":") + 2;
         int end = payload.indexOf("\"", start);
         mqttRequestMessage = payload.substring(start, end);
         hasNewMqttRequest = true;
+        registerActivity();
     });
 
     net.setCameraCallback([](String payload) {
@@ -258,20 +328,19 @@ void setup() {
     });
     
     net.setAudioCallback([](String payload) {
-        Serial.println("[MQTT AUDIO] " + payload);
         hasAudioRequest = true;
+        registerActivity();
     });
 
     net.setAdminCallCallback([](String payload) {
-        Serial.println("[MQTT ADMIN CALL] " + payload);
         int start = payload.indexOf(":") + 2;
         int end = payload.indexOf("\"", start);
         adminCallNumber = payload.substring(start, end);
         hasAdminCallRequest = true;
+        registerActivity();
     });
 
     net.setContactsUpdateCallback([](String payload) {
-        Serial.println("[MQTT CONTACTS] " + payload);
         int start = payload.indexOf("[") + 1;
         int end = payload.indexOf("]");
         String list = payload.substring(start, end);
@@ -292,246 +361,147 @@ void setup() {
     });
 
     gps.begin();
-    
     Serial.println("========================================\n");
 }
 
 void loop() {
     ArduinoOTA.handle(); 
 
-    // 1. Camera Request
+    // --- OLED SLEEP / WAKE ---
+    if (oledOk && oledAwake && !oledShowingTemp) {
+        if (millis() - lastOledActivity > OLED_TIMEOUT_MS) {
+            sleepOled();
+        }
+    }
+    
+    // Restore main screen if temp message expired
+    if (oledOk && oledShowingTemp && millis() > oledRestoreTime) {
+        drawMainScreen();
+    }
+
+    // --- WAKE ON BUTTON PRESS ---
+    if (inputs.isUpPressed() || inputs.isDownPressed() || inputs.isSelectPressed()) {
+        registerActivity();
+    }
+
+    // --- NON-BLOCKING BEEP UPDATE ---
+    updateBeeps();
+
+    // --- CAMERA REQUEST ---
     if (hasCameraRequest) {
         hasCameraRequest = false;
-        Serial.println("[CAMERA] Capture requested! ID: " + cameraRequestId);
-        
         String base64Image = camera.captureBase64();
-        
-        if (base64Image != "") {
-            if (net.isConnected()) {
-                bool success = net.uploadPhoto(cameraRequestId, base64Image);
-                if (success) Serial.println("[CAMERA] Real photo uploaded to backend.");
-                else Serial.println("[CAMERA] Upload failed.");
-            }
-        } else {
-            Serial.println("[CAMERA] Failed to capture image.");
+        if (base64Image != "" && net.isConnected()) {
+            net.uploadPhoto(cameraRequestId, base64Image);
         }
     }
 
-    // 2. Audio Request
+    // --- AUDIO REQUEST ---
     if (hasAudioRequest) {
         hasAudioRequest = false;
-        Serial.println("[AUDIO] New voice message received!");
-        
-        inputs.buzz(100); delay(100);
-        inputs.buzz(100); delay(100);
-        inputs.buzz(100);
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println("NEW AUDIO MSG");
-            display.display();
-            delay(3000);
-            
-            // Restore centered layout
-            display.clearDisplay();
-            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
-            String topText = BUS_ID + " ONLINE";
-            display.setTextSize(1);
-            display.setCursor(getCenterX(topText, 1), 6);
-            display.print(topText);
-            String ipStr = "IP: " + WiFi.localIP().toString();
-            display.setCursor(getCenterX(ipStr, 1), 50);
-            display.print(ipStr);
-            display.display();
-        }
+        startBeeps(3, 100, 200); // 3 short beeps
+        showTempMessage("NEW AUDIO MSG", "", 3000);
     }
 
-    // 3. Student Stop Request
+    // --- STUDENT STOP REQUEST ---
     if (hasNewMqttRequest) {
         hasNewMqttRequest = false;
-        Serial.println("[ACTION] New Request: " + mqttRequestMessage);
+        startBeeps(5, 1000, 1000); // 5 long beeps
         
-        for (int i = 0; i < 5; i++) {
-            inputs.buzz(1000);
-            delay(1000);
-        }
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.setTextSize(1);
-            display.setCursor(0, 0);
-            
-            int teIndex = mqttRequestMessage.indexOf(" te achi");
-            if (teIndex > 0) {
-                String line1 = mqttRequestMessage.substring(0, teIndex);
-                String line2 = mqttRequestMessage.substring(teIndex + 1);
-                display.println("NEW REQUEST:");
-                display.println(line1);
-                display.println(line2);
-            } else {
-                display.println("NEW REQUEST:");
-                display.println(mqttRequestMessage);
-            }
-            
-            display.display();
-            delay(5000);
-            
-            // Restore centered layout
-            display.clearDisplay();
-            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
-            String topText = BUS_ID + " ONLINE";
-            display.setTextSize(1);
-            display.setCursor(getCenterX(topText, 1), 6);
-            display.print(topText);
-            String ipStr = "IP: " + WiFi.localIP().toString();
-            display.setCursor(getCenterX(ipStr, 1), 50);
-            display.print(ipStr);
-            display.display();
+        if (mqttRequestMessage.indexOf(" te achi") > 0) {
+            showTempMessage("NEW REQUEST:", mqttRequestMessage, 5000);
+        } else {
+            showTempMessage("NEW REQUEST:", mqttRequestMessage, 5000);
         }
     }
 
-    // 4. Admin Call Request
+    // --- ADMIN CALL REQUEST ---
     if (hasAdminCallRequest) {
         hasAdminCallRequest = false;
-        Serial.println("[GSM] Admin requested call. Waking SIM800L...");
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println("ADMIN CALLING...");
-            display.display();
-        }
-        
+        showTempMessage("ADMIN CALLING...", "", 2000);
         gsm.makeAdminCall(adminCallNumber);
-        
-        if (oledOk) {
-            // Restore centered layout
-            display.clearDisplay();
-            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
-            String topText = BUS_ID + " ONLINE";
-            display.setTextSize(1);
-            display.setCursor(getCenterX(topText, 1), 6);
-            display.print(topText);
-            String ipStr = "IP: " + WiFi.localIP().toString();
-            display.setCursor(getCenterX(ipStr, 1), 50);
-            display.print(ipStr);
-            display.display();
-        }
     }
     
     net.loopMQTT();
 
-    // 5. RFID Scan
+    // --- RFID SCAN ---
     if (rfid.isConnected() && rfid.scan()) {
         String uid = rfid.getLastUID();
-        Serial.println("[SCAN] Card: " + uid);
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.setCursor(0, 0);
-            display.println("BOARDING...");
-            display.println("UID: " + uid);
-            display.display();
-        }
-
+        showTempMessage("BOARDING...", "UID: " + uid, 2000);
         if (net.isConnected()) {
             net.postAttendance(uid, "BOARDING", BUS_ID);
-            Serial.println("[CLOUD] Attendance sent.");
         }
     }
     
-    // 6. Emergency Button
+    // --- EMERGENCY BUTTON ---
     if (inputs.isEmergencyPressed()) {
         if (!emergencyHoldActive) {
             emergencyHoldActive = true;
             emergencyHoldStart = millis();
-            Serial.println("[EMERGENCY] Button pressed. Hold for 3s to trigger...");
         } 
         else if (!emergencyTriggered && (millis() - emergencyHoldStart >= 3000)) {
             emergencyTriggered = true;
-            Serial.println("[EMERGENCY] 3-second hold confirmed! TRIGGERING ALARM.");
+            emergencyAlarmActive = true;
+            emergencyAlarmStart = millis();
             
-            inputs.buzz(2000);
-            
+            // Show emergency screen
             if (oledOk) {
+                registerActivity();
                 display.clearDisplay();
-                display.setCursor(0, 0);
                 display.setTextSize(2);
+                display.setCursor(0, 0);
                 display.println("EMERGENCY!");
                 display.display();
+                oledShowingTemp = true;
+                oledRestoreTime = millis() + 5000;
             }
             
+            // Trigger everything
             gps.update();
             String latStr = gps.hasFix() ? String(gps.getLat(), 6) : "0.0";
             String lngStr = gps.hasFix() ? String(gps.getLng(), 6) : "0.0";
-            
             String eventId = "";
             if (net.isConnected()) {
                 eventId = net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
             }
-            
             gsm.triggerEmergency(BUS_ID, latStr, lngStr);
-            
             if (eventId != "") {
                 net.postAlertStatus(eventId, "delivered");
             }
         }
     } 
     else {
-        if (emergencyHoldActive && !emergencyTriggered) {
-            Serial.println("[EMERGENCY] Cancelled (released before 3s).");
-        }
         emergencyHoldActive = false;
-        if (emergencyTriggered) {
-            emergencyTriggered = false;
-            delay(1000);
+        emergencyTriggered = false;
+    }
+
+    // Emergency alarm beep (non-blocking)
+    if (emergencyAlarmActive) {
+        if (millis() - emergencyAlarmStart < 2000) {
+            inputs.buzz(100); // Short beeps, called repeatedly
+        } else {
+            emergencyAlarmActive = false;
         }
     }
     
-    // 7. GPS Updates
+    // --- GPS UPDATES ---
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000) {
         lastGps = millis();
         gps.update();
-        
-        if (gps.hasFix()) {
-            double lat = gps.getLat();
-            double lng = gps.getLng();
-            double speed = gps.getSpeed();
-            String status = (speed > 2.0) ? "Moving" : "Stopped";
-            
-            Serial.printf("[GPS] Lat: %.6f, Lng: %.6f, Speed: %.1f\n", lat, lng, speed);
-            
-            if (net.isConnected()) {
-                net.postGPS(BUS_ID, lat, lng, speed, status);
-            }
-        } else {
-            if (millis() % 15000 < 5000) {
-                Serial.printf("[GPS] Searching... Satellites: %d\n", gps.getSatellites());
-            }
+        if (gps.hasFix() && net.isConnected()) {
+            net.postGPS(BUS_ID, gps.getLat(), gps.getLng(), gps.getSpeed(), (gps.getSpeed() > 2.0) ? "Moving" : "Stopped");
         }
     }
     
-    // 8. Heartbeat (CENTERED)
+    // --- HEARTBEAT ---
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
         Serial.printf("[Status] %s | WiFi: %s | OLED: %d\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk);
-        
-        if (oledOk) {
-            display.clearDisplay();
-            display.drawRect(0, 0, 128, 20, SSD1306_WHITE);
-            String topText = BUS_ID + " ONLINE";
-            display.setTextSize(1);
-            display.setCursor(getCenterX(topText, 1), 6);
-            display.print(topText);
-            String ipStr = "IP: " + WiFi.localIP().toString();
-            display.setCursor(getCenterX(ipStr, 1), 50);
-            display.print(ipStr);
-            display.display();
-        }
     }
     
-    delay(50);
+    // --- NON-BLOCKING YIELD ---
+    yield();
+    vTaskDelay(1);
 }
