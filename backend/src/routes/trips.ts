@@ -152,7 +152,7 @@ router.post("/end", async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 6. Record Attendance
+// 6. Record Attendance (NOW RETURNS STUDENT NAME)
 // ==========================================
 router.post("/attendance", async (req: Request, res: Response) => {
   try {
@@ -171,14 +171,30 @@ router.post("/attendance", async (req: Request, res: Response) => {
     }
 
     const tripId = activeTrips.docs[0]!.id;
+    
+    // Try to find the student's real name in Firestore
+    let finalName = studentName || "Unknown";
+    const studentQuery = await db.collection("users").where("rfidUid", "==", uid).get();
+    if (!studentQuery.empty) {
+      finalName = studentQuery.docs[0].data().displayName || "Unknown";
+    } else if (studentName) {
+      finalName = studentName; // fallback to whatever the ESP32 sent
+    }
+
     const eventData = {
       uid, type, busId, tripId,
-      studentName: studentName || "Unknown",
+      studentName: finalName,
       timestamp: new Date().toISOString(),
     };
 
     const docRef = await db.collection("tripAttendance").add(eventData);
-    res.status(201).json({ message: "Attendance recorded", eventId: docRef.id });
+    
+    // SEND THE NAME BACK TO THE ESP32
+    res.status(201).json({ 
+      message: "Attendance recorded", 
+      eventId: docRef.id,
+      studentName: finalName 
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

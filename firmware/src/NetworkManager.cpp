@@ -6,16 +6,14 @@ NetworkManager::NetworkManager(const char* ssid, const char* password, const cha
     this->password = password;
     this->backendUrl = backendUrl;
     this->mqttServer = mqttServer;
-    this->_busId = "UNASSIGNED"; // Default
+    this->_busId = "UNASSIGNED"; 
 }
 
-// NEW: Set the dynamic Bus ID
 void NetworkManager::setBusId(String busId) {
     this->_busId = busId;
 }
 
 void NetworkManager::begin() {
-    // WiFiManager handles the connection, so we just check status
     if (WiFi.status() == WL_CONNECTED) {
         Serial.print("[WiFi] Already Connected! IP: ");
         Serial.println(WiFi.localIP());
@@ -39,7 +37,6 @@ void NetworkManager::connectMQTT() {
     if (mqttClient.connect(clientId.c_str(), "SMART-BUS", "uftbsmartbus@")) {
         Serial.println("[MQTT] Connected to EMQX Cloud!");
         
-        // DYNAMIC SUBSCRIPTIONS based on _busId
         mqttClient.subscribe(("smartbus/" + _busId + "/request").c_str());
         mqttClient.subscribe(("smartbus/" + _busId + "/camera").c_str());
         mqttClient.subscribe(("smartbus/" + _busId + "/audio").c_str());
@@ -74,8 +71,6 @@ void NetworkManager::setMessageCallback(std::function<void(String)> callback) {
             message += (char)payload[i];
         }
         String t = String(topic);
-        
-        // DYNAMIC TOPIC CHECK based on _busId
         String prefix = "smartbus/" + _busId + "/";
         
         if (t.indexOf(prefix + "request") >= 0 && onMessage) {
@@ -108,16 +103,33 @@ void NetworkManager::setContactsUpdateCallback(std::function<void(String)> callb
     onContactsUpdate = callback;
 }
 
-bool NetworkManager::postAttendance(String uid, String type, String busId) {
-    if (!isConnected()) return false;
+// CHANGED: Returns String (student name)
+String NetworkManager::postAttendance(String uid, String type, String busId) {
+    if (!isConnected()) return "";
     HTTPClient http;
     String url = String(backendUrl) + "/api/trips/attendance";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     String payload = "{\"uid\":\"" + uid + "\",\"type\":\"" + type + "\",\"busId\":\"" + busId + "\"}";
+    
     int httpResponseCode = http.POST(payload);
+    String studentName = "";
+    
+    if (httpResponseCode == 201) {
+        String response = http.getString();
+        // Parse JSON response: {"message":"Attendance recorded","eventId":"...","studentName":"Fahim"}
+        int nameStart = response.indexOf("\"studentName\":\"");
+        if (nameStart > 0) {
+            nameStart += 15; // Length of "studentName":"
+            int nameEnd = response.indexOf("\"", nameStart);
+            if (nameEnd > 0) {
+                studentName = response.substring(nameStart, nameEnd);
+            }
+        }
+    }
+    
     http.end();
-    return (httpResponseCode == 201);
+    return studentName;
 }
 
 bool NetworkManager::postGPS(String busId, double lat, double lng, double speed, String status) {
@@ -127,10 +139,7 @@ bool NetworkManager::postGPS(String busId, double lat, double lng, double speed,
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     
-    // NEW: Get the IP address
     String ipStr = WiFi.localIP().toString(); 
-    
-    // NEW: Add ip to the payload
     String payload = "{\"busId\":\"" + busId + "\",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + ",\"speed\":" + String(speed, 1) + ",\"status\":\"" + status + "\",\"ip\":\"" + ipStr + "\"}";
     
     int httpResponseCode = http.POST(payload);

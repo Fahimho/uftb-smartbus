@@ -19,7 +19,7 @@ void ResourceManager::begin() {
 
     // 2. Initialize I2C
     Wire.begin(5, 6);
-    Wire.setClock(100000);
+    Wire.setClock(400000);
 
     delay(100);
 

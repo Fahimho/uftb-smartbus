@@ -14,11 +14,12 @@ public:
     bool isConnected();
     String getStatus();
     
-    // ADD THESE TWO LINES:
     void setBusId(String busId);
     String getBusId() { return _busId; }
 
-    bool postAttendance(String uid, String type, String busId);
+    // CHANGED: Now returns String (student name) instead of bool
+    String postAttendance(String uid, String type, String busId);
+    
     bool postGPS(String busId, double lat, double lng, double speed, String status);
     String postEmergency(String busId, double lat, double lng);
     bool postAlertStatus(String eventId, String status);
@@ -36,7 +37,7 @@ private:
     const char* backendUrl;
     const char* mqttServer;
     
-    String _busId; // <-- ADD THIS LINE
+    String _busId;
     
     WiFiClientSecure espClient; 
     PubSubClient mqttClient;
