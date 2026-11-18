@@ -17,6 +17,10 @@
 #include "GPSManager.h"
 #include "CameraManager.h"
 #include "Sim800Manager.h"
+#include "Diag.h"
+#include "Buzzer.h"
+#include "UiPolicy.h"
+#include "esp_system.h"
 
 // --- PIN DEFINITIONS ---
 #define I2C_SDA 5
@@ -44,6 +48,7 @@ ResourceManager resMgr;
 RFIDManager rfid(UINT8_MAX, resMgr);
 SDManager sd(SD_CS, resMgr);
 InputManager inputs(resMgr);
+Buzzer buzzer(resMgr);
 NetworkManager net("", "", BACKEND_URL, MQTT_SERVER);
 GPSManager gps(GPS_RX, -1);
 CameraManager camera;
@@ -52,27 +57,33 @@ Sim800Manager gsm(GSM_RX, GSM_TX);
 bool oledOk = false;
 unsigned long lastOledActivity = 0;
 const unsigned long OLED_TIMEOUT_MS = 20000;
-bool oledAwake = true;
+volatile bool oledAwake = true;   // written by the UI (loop task), read by the input task
 unsigned long oledRestoreTime = 0;
 bool oledShowingTemp = false;
+// true while the startup/"home" screen (bus id + IP) is on the display. The first navigation press
+// only dismisses it to the main menu; it must never navigate or select.
+bool homeVisible = false;
 
-// --- BEEP STATE ---
-// (unchanged externally; driven non-blocking now)
-int beepCount = 0;
-int targetBeeps = 0;
-unsigned long lastBeepTime = 0;
-int beepDuration = 0;
-int beepGap = 0;
-int currentBeepPhase = 0;
+// ---- OLED access goes through the shared I2C mutex ----------------------------------
+// The OLED and the MCP23017 (buttons, buzzer, RFID chip-select) share Wire. Drawing into the
+// frame buffer needs no lock; only the bus transfers do. Bounded wait: if the bus is busy for
+// 250 ms the push is skipped (the next draw refreshes the screen).
+static uint32_t oledPushSkipped = 0;
+static void oledPush() {
+    if (!oledOk) return;
+    if (!resMgr.lockI2C(250)) { oledPushSkipped++; return; }
+    display.display();
+    homeVisible = false;     // any screen update clears it; drawMainScreen() sets it again afterwards
+    resMgr.unlockI2C();
+}
+static void oledCmd(uint8_t c) {
+    if (!oledOk) return;
+    if (!resMgr.lockI2C(250)) { oledPushSkipped++; return; }
+    display.ssd1306_command(c);
+    resMgr.unlockI2C();
+}
 
-// --- EMERGENCY ALARM (non-blocking) ---
-unsigned long alarmPulseStart = 0;
-unsigned long alarmPulseWindowStart = 0;
-bool alarmPulseOn = false;
-bool alarmPulseWindowActive = false;
-const unsigned long ALARM_PULSE_ON_MS = 100;
-const unsigned long ALARM_PULSE_OFF_MS = 100;
-const unsigned long ALARM_WINDOW_MS = 2000;
+// Beeps and the emergency alarm are owned by Buzzer (Buzzer.h): single owner of MCP GPA4.
 
 // --- MQTT / EVENT STATE ---
 volatile bool hasNewMqttRequest = false;
@@ -87,8 +98,6 @@ String adminCallNumber = "";
 unsigned long emergencyHoldStart = 0;
 bool emergencyHoldActive = false;
 bool emergencyTriggered = false;
-bool emergencyAlarmActive = false;
-unsigned long emergencyAlarmStart = 0;
 
 // --- AUDIO STATE ---
 enum AudioState { AUDIO_IDLE, AUDIO_RECORDING, AUDIO_UPLOADING };
@@ -116,8 +125,7 @@ int recentNamesCount = 0;
 bool tripActive = false;
 
 // --- FREERTOS QUEUE ---
-// CHANGED: added BTN_SELECT_LONG and BTN_SELECT_RELEASE
-enum ButtonEvent { BTN_UP, BTN_DOWN, BTN_SELECT, BTN_SELECT_LONG, BTN_SELECT_RELEASE, BTN_WAKE };
+// ButtonEvent (UP/DOWN/SELECT/SELECT_LONG/WAKE/EMERGENCY) is defined in InputManager.h.
 QueueHandle_t buttonQueue = NULL;
 
 // --- HELPER ---
@@ -134,83 +142,20 @@ void wakeOled();
 void sleepOled();
 void registerActivity();
 void startBeeps(int count, int duration, int gap);
-void updateBeeps();
 void initPDM();
 bool uploadAudioToBackend(uint8_t* data, size_t length);
 void startAudioRecording();
 void updateAudioRecording();
 void drawCurrentScreen();
 void processButtonEvent(ButtonEvent ev);
+void handleEmergency();
 void apiStartTrip();
 void apiEndTrip();
 void saveBrightness(int val);
 void saveRecDur(int val);
 void clearAllData();
 
-// --- BUTTON TASK (Core 0) ---
-// CHANGED: SELECT now emits BTN_SELECT (press), BTN_SELECT_LONG (held >=1200ms, once),
-//          BTN_SELECT_RELEASE (on release). UP/DOWN unchanged.
-void buttonTask(void *pvParameters) {
-    Serial.println("[Task] Button polling started on Core 0");
-    bool lastUp = false, lastDown = false;
-    bool selectDown = false;
-    unsigned long selectDownAt = 0;
-    bool selectLongFired = false;
-
-    while (true) {
-        // UP
-        bool up = inputs.isUpPressed();
-        if (up && !lastUp) {
-            ButtonEvent ev = BTN_UP;
-            xQueueSend(buttonQueue, &ev, 0);
-        }
-        lastUp = up;
-
-        // DOWN
-        bool down = inputs.isDownPressed();
-        if (down && !lastDown) {
-            ButtonEvent ev = BTN_DOWN;
-            xQueueSend(buttonQueue, &ev, 0);
-        }
-        lastDown = down;
-
-        // SELECT: edge for short-press event, raw hold for long-press event, release event.
-        bool selEdge = inputs.isSelectPressed();       // true once, on press
-        bool selHeld = inputs.isSelectHeld();          // true while physically held
-
-        if (selEdge && !selectDown) {
-            selectDown = true;
-            selectDownAt = millis();
-            selectLongFired = false;
-            ButtonEvent ev = BTN_SELECT;
-            xQueueSend(buttonQueue, &ev, 0);
-        }
-
-        if (selectDown && selHeld && !selectLongFired) {
-            if (millis() - selectDownAt >= 1200) {
-                selectLongFired = true;
-                ButtonEvent ev = BTN_SELECT_LONG;
-                xQueueSend(buttonQueue, &ev, 0);
-            }
-        }
-
-        if (selectDown && !selHeld && !selEdge) {
-            // Physical release: raw pin is high, and no new press edge this cycle.
-            selectDown = false;
-            selectLongFired = false;
-            ButtonEvent ev = BTN_SELECT_RELEASE;
-            xQueueSend(buttonQueue, &ev, 0);
-        }
-
-        // WAKE (display was asleep, any button pressed)
-        if (!oledAwake && (up || down || selEdge)) {
-            ButtonEvent ev = BTN_WAKE;
-            xQueueSend(buttonQueue, &ev, 0);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
+// Button polling/debouncing lives in InputManager (InputTask, Core 0).
 
 // --- OLED DRAWING ---
 void drawMainScreen() {
@@ -225,7 +170,8 @@ void drawMainScreen() {
     String ipStr = "IP: " + WiFi.localIP().toString();
     display.setCursor(getCenterX(ipStr, 1), 50);
     display.print(ipStr);
-    display.display();
+    oledPush();
+    homeVisible = true;
     lastOledActivity = millis();
     oledShowingTemp = false;
 }
@@ -256,7 +202,7 @@ void drawMenu(String title, String items[], int count) {
         display.setCursor(2, y);
         display.print(items[idx]);
     }
-    display.display();
+    oledPush();
 }
 
 void showTempMessage(String line1, String line2, int durationMs) {
@@ -267,7 +213,7 @@ void showTempMessage(String line1, String line2, int durationMs) {
     display.setCursor(0, 0);
     display.println(line1);
     if (line2 != "") display.println(line2);
-    display.display();
+    oledPush();
     oledRestoreTime = millis() + durationMs;
     oledShowingTemp = true;
     lastOledActivity = millis();
@@ -275,15 +221,17 @@ void showTempMessage(String line1, String line2, int durationMs) {
 
 void wakeOled() {
     if (!oledOk) return;
-    display.ssd1306_command(SSD1306_DISPLAYON);
+    oledCmd(SSD1306_DISPLAYON);
     oledAwake = true;
+    inputs.setDisplayAwake(true);
     lastOledActivity = millis();
     drawMainScreen();
 }
 
 void sleepOled() {
     if (!oledOk) return;
-    display.ssd1306_command(SSD1306_DISPLAYOFF);
+    inputs.setDisplayAwake(false);   // first: a press from now on is a wake-only press
+    oledCmd(SSD1306_DISPLAYOFF);
     oledAwake = false;
 }
 
@@ -292,72 +240,11 @@ void registerActivity() {
     if (!oledAwake) wakeOled();
 }
 
-// --- BEEP LOGIC (non-blocking) ---
-// CHANGED: drives MCP23017 GP4 directly instead of calling inputs.buzz() (which used delay()).
+// --- BEEP / ALARM (see Buzzer.cpp) ---
+// Thin wrapper kept so existing call sites are unchanged. Rejected (ignored) while an emergency
+// alarm is running.
 void startBeeps(int count, int duration, int gap) {
-    beepCount = 0;
-    targetBeeps = count;
-    beepDuration = duration;
-    beepGap = gap;
-    currentBeepPhase = 0;
-    lastBeepTime = millis();
-}
-
-void updateBeeps() {
-    if (beepCount >= targetBeeps) return;
-    unsigned long now = millis();
-    if (currentBeepPhase == 0) {
-        // waiting to start next beep
-        if (now - lastBeepTime >= beepGap) {
-            resMgr.digitalWriteMCP(4, HIGH);
-            currentBeepPhase = 1;
-            lastBeepTime = now;
-            beepCount++;
-        }
-    } else {
-        // in the middle of a beep
-        if (now - lastBeepTime >= beepDuration) {
-            resMgr.digitalWriteMCP(4, LOW);
-            currentBeepPhase = 0;
-            lastBeepTime = now;
-        }
-    }
-}
-
-// --- EMERGENCY ALARM PULSE (non-blocking) ---
-void startAlarmPulse() {
-    alarmPulseWindowStart = millis();
-    alarmPulseWindowActive = true;
-    alarmPulseOn = true;
-    alarmPulseStart = millis();
-    resMgr.digitalWriteMCP(4, HIGH);
-}
-
-void updateAlarmPulse() {
-    if (!alarmPulseWindowActive) return;
-    unsigned long now = millis();
-    if (now - alarmPulseWindowStart >= ALARM_WINDOW_MS) {
-        // window ended
-        alarmPulseWindowActive = false;
-        if (alarmPulseOn) {
-            resMgr.digitalWriteMCP(4, LOW);
-            alarmPulseOn = false;
-        }
-        return;
-    }
-    if (alarmPulseOn) {
-        if (now - alarmPulseStart >= ALARM_PULSE_ON_MS) {
-            resMgr.digitalWriteMCP(4, LOW);
-            alarmPulseOn = false;
-            alarmPulseStart = now;
-        }
-    } else {
-        if (now - alarmPulseStart >= ALARM_PULSE_OFF_MS) {
-            resMgr.digitalWriteMCP(4, HIGH);
-            alarmPulseOn = true;
-            alarmPulseStart = now;
-        }
-    }
+    buzzer.beep((uint8_t)count, (uint16_t)duration, (uint16_t)gap);
 }
 
 // --- AUDIO LOGIC ---
@@ -431,14 +318,14 @@ void updateAudioRecording() {
             display.print("Progress: ");
             display.print(progress);
             display.println("%");
-            display.display();
+            oledPush();
         }
 
         if (samplesCaptured >= totalSamples || (now - audioStateStart > RECORD_SECONDS * 1000 + 3000)) {
             audioState = AUDIO_UPLOADING;
             display.clearDisplay();
             display.println("UPLOADING...");
-            display.display();
+            oledPush();
         }
     }
     else if (audioState == AUDIO_UPLOADING) {
@@ -493,8 +380,8 @@ void saveBrightness(int val) {
     preferences.putInt("brightness", val);
     preferences.end();
     brightnessValue = val;
-    display.ssd1306_command(SSD1306_SETCONTRAST);
-    display.ssd1306_command(val);
+    oledCmd(SSD1306_SETCONTRAST);
+    oledCmd(val);
 }
 
 void saveRecDur(int val) {
@@ -531,7 +418,7 @@ void drawCurrentScreen() {
         display.print("GPS: "); display.print(gps.getSatellites()); display.println(" sats");
         display.setCursor(0, 56);
         display.println("[SELECT to Back]");
-        display.display();
+        oledPush();
     }
     else if (currentScreen == SCREEN_VOICE) {
         String items[] = {"1. Record New", "2. Back"};
@@ -554,7 +441,7 @@ void drawCurrentScreen() {
         }
         display.setCursor(0, 56);
         display.println("[SELECT to Back]");
-        display.display();
+        oledPush();
     }
     else if (currentScreen == SCREEN_SETTINGS) {
         String items[] = {"1. Brightness", "2. Rec Duration", "3. Clear All", "4. Reboot", "5. Back"};
@@ -570,9 +457,9 @@ void drawCurrentScreen() {
         display.println(" >");
         display.setCursor(0, 56);
         display.println("SELECT to Save");
-        display.display();
-        display.ssd1306_command(SSD1306_SETCONTRAST);
-        display.ssd1306_command(pendingBrightness);
+        oledPush();
+        oledCmd(SSD1306_SETCONTRAST);
+        oledCmd(pendingBrightness);
     }
     else if (currentScreen == SCREEN_ADJUST_REC_DUR) {
         display.clearDisplay();
@@ -584,7 +471,7 @@ void drawCurrentScreen() {
         display.println("s >");
         display.setCursor(0, 56);
         display.println("SELECT to Save");
-        display.display();
+        oledPush();
     }
     else if (currentScreen == SCREEN_CONFIRM_CLEAR) {
         display.clearDisplay();
@@ -596,7 +483,7 @@ void drawCurrentScreen() {
         display.setCursor(0, 40);
         display.println("SHORT: Cancel");
         display.println("LONG: Wipe all");
-        display.display();
+        oledPush();
     }
 }
 
@@ -605,25 +492,82 @@ void drawCurrentScreen() {
 //          BTN_SELECT_LONG handles the "back to main" behavior.
 //          BTN_SELECT_RELEASE is a no-op (state is reset in buttonTask).
 //          The old selectWasPressed/selectPressStart logic is gone.
+// Emergency sequence. Triggered by BTN_EMERGENCY, which the input task produces after a debounced,
+// CONTINUOUS 3 s hold (one event per hold; release re-arms). It does not depend on the OLED state.
+// NOTE (Phase 2): the HTTP + GSM parts below still block loop(); the detection no longer does.
+void handleEmergency() {
+    Diag::crumb("emergency: start");
+    // Alarm FIRST: it runs in its own task, so it is not delayed by the HTTP/GSM calls below and
+    // is not affected by releasing the emergency button.
+    buzzer.startEmergency();
+
+    if (oledOk) {
+        registerActivity();
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setCursor(0, 0);
+        display.println("EMERGENCY!");
+        oledPush();
+        oledShowingTemp = true;
+        oledRestoreTime = millis() + 5000;
+    }
+
+    bool fix = gps.hasFix();
+    String latStr = fix ? String(gps.getLat(), 6) : "0.0";
+    String lngStr = fix ? String(gps.getLng(), 6) : "0.0";
+    if (!fix) Serial.println("[EMERGENCY] no valid GPS fix: location unknown");
+    String eventId = "";
+    if (net.isConnected()) {
+        Diag::crumb("emergency: backend");
+        eventId = net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
+    }
+    Diag::crumb("emergency: gsm");
+    gsm.triggerEmergency(BUS_ID, latStr, lngStr);
+    if (eventId != "") {
+        net.postAlertStatus(eventId, "delivered");
+    }
+    Diag::crumb("emergency: done");
+
+    // Anything pressed while the sequence was blocking is stale: discard it (also prevents a
+    // duplicate emergency from a hold that straddled the blocking period).
+    if (buttonQueue != NULL) xQueueReset(buttonQueue);
+}
+
+static void showMainMenu() {
+    currentScreen = SCREEN_MAIN;
+    menuCursor = 0;
+    menuScroll = 0;
+    drawCurrentScreen();
+    lastOledActivity = millis();
+}
+
 void processButtonEvent(ButtonEvent ev) {
+    // Emergency works even if the OLED failed to initialise or is asleep.
+    if (ev == BTN_EMERGENCY) {
+        handleEmergency();
+        return;
+    }
+
     if (!oledOk) return;
 
-    if (ev == BTN_WAKE) {
-        if (!oledAwake) {
+    // First-press rules (identical for UP, DOWN and SELECT), see UiPolicy.h. The input task already
+    // replaces the normal event with BTN_WAKE when the display sleeps; classifyNavEvent() also covers
+    // the display going to sleep between the press and this handler, and the home/boot screen.
+    switch (classifyNavEvent(ev, oledAwake, homeVisible)) {
+        case PRESS_WAKE_TO_MENU:
             wakeOled();
-            currentScreen = SCREEN_MAIN;
-            menuCursor = 0;
-            drawCurrentScreen();
-        }
-        return;
+            showMainMenu();
+            return;
+        case PRESS_DISMISS_HOME:
+            showMainMenu();
+            return;
+        case PRESS_IGNORE:
+            return;
+        case PRESS_NORMAL:
+            break;
     }
 
-    if (!oledAwake) return;
-
-    if (ev == BTN_SELECT_RELEASE) {
-        // No action; release is already accounted for in buttonTask.
-        return;
-    }
+    registerActivity();          // every handled press restarts the 20 s inactivity timer
 
     if (ev == BTN_SELECT_LONG) {
         // Long-press = go back to main (except on main itself, or while adjusting
@@ -754,7 +698,10 @@ void setup() {
     Serial.println("UFTB SmartBus - FULL SYSTEM");
     Serial.println("========================================");
 
+    Diag::begin();                 // reset reason / boot count / last stage (before any hardware init)
+    Diag::crumb("setup: resMgr");
     resMgr.begin();
+    buzzer.begin();                // GPA4 owner: forces OFF, starts BuzzerTask
 
     if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         oledOk = true;
@@ -772,12 +719,23 @@ void setup() {
         display.setTextSize(1);
         display.setCursor(0, 0);
         display.println("BOOTING...");
-        display.display();
+        oledPush();
     }
 
+    Diag::crumb("setup: inputs");
     inputs.begin();
 
-    if (inputs.isSelectPressed()) {
+    // Queue + input task start here so the emergency button is monitored from now on (also during
+    // the long Wi-Fi/portal phase of setup). Events are consumed by loop() after setup().
+    buttonQueue = xQueueCreate(16, sizeof(ButtonEvent));
+    if (buttonQueue == NULL) {
+        Serial.println("[ERROR] Failed to create button queue!");
+    } else if (!inputs.startTask(buttonQueue, 3, 0)) {
+        Serial.println("[ERROR] Input task not running: buttons and emergency are DISABLED");
+    }
+
+    // Factory reset only if SELECT is held continuously for 1.5 s at boot (a spurious/short read cannot wipe NVS).
+    if (inputs.bootSelectHeld(1500)) {
         Serial.println("[FACTORY RESET] Wiping memory...");
         preferences.begin("smartbus", false);
         preferences.clear();
@@ -811,7 +769,7 @@ void setup() {
             display.println("SETUP MODE");
             display.println("Open Browser to:");
             display.println(WiFi.localIP());
-            display.display();
+            oledPush();
         }
 
         server.on("/", HTTP_GET, [&]() {
@@ -855,7 +813,7 @@ void setup() {
                     display.println("");
                     display.println("Check flash.");
                     display.println("Retry in browser.");
-                    display.display();
+                    oledPush();
                 }
                 server.send(500, "text/html",
                     "<h1 style='color:red;'>NVS WRITE FAILED</h1>"
@@ -893,8 +851,8 @@ void setup() {
 
     // --- NOW INITIALIZE EVERYTHING ELSE ---
     if (oledOk) {
-        display.ssd1306_command(SSD1306_SETCONTRAST);
-        display.ssd1306_command(brightnessValue);
+        oledCmd(SSD1306_SETCONTRAST);
+        oledCmd(brightnessValue);
     }
 
     drawMainScreen();
@@ -979,30 +937,38 @@ void setup() {
         gsm.updateContacts(nums, count);
     });
 
-    gps.begin();
+    Diag::crumb("setup: gps");
+    gps.begin();                  // GPS on Serial1 (GPIO44), own drain task. GSM is on Serial2.
 
-    // --- CREATE BUTTON QUEUE AND TASK (Core 0) ---
-    buttonQueue = xQueueCreate(10, sizeof(ButtonEvent));
+    // Presses made during the (possibly long) setup are stale; only an emergency hold is kept.
     if (buttonQueue != NULL) {
-        xTaskCreatePinnedToCore(
-            buttonTask,
-            "ButtonTask",
-            4096,
-            NULL,
-            2,
-            NULL,
-            0
-        );
-        Serial.println("[Task] Button task created on Core 0");
-    } else {
-        Serial.println("[ERROR] Failed to create button queue!");
+        ButtonEvent pending;
+        bool emergencyPending = false;
+        while (xQueueReceive(buttonQueue, &pending, 0) == pdTRUE) {
+            if (pending == BTN_EMERGENCY) emergencyPending = true;
+        }
+        if (emergencyPending) {
+            Serial.println("[EMERGENCY] hold detected during boot: handling now");
+            handleEmergency();
+        }
     }
 
+    Diag::printHeap("setup-done");
+    Diag::crumb("loop");
     Serial.println("========================================\n");
 }
 
 // --- LOOP ---
 void loop() {
+    // loop() latency diagnostics: a long iteration delays UI event handling (not button detection).
+    static uint32_t lastLoopStart = 0;
+    static uint32_t maxLoopGapMs = 0;
+    {
+        uint32_t t = millis();
+        if (lastLoopStart != 0 && (t - lastLoopStart) > maxLoopGapMs) maxLoopGapMs = t - lastLoopStart;
+        lastLoopStart = t;
+    }
+
     ArduinoOTA.handle();
 
     if (oledOk && oledAwake && !oledShowingTemp && audioState == AUDIO_IDLE) {
@@ -1017,12 +983,10 @@ void loop() {
 
     // --- PROCESS BUTTON EVENTS FROM QUEUE ---
     ButtonEvent ev;
-    while (xQueueReceive(buttonQueue, &ev, 0) == pdTRUE) {
+    while (buttonQueue != NULL && xQueueReceive(buttonQueue, &ev, 0) == pdTRUE) {
         processButtonEvent(ev);
     }
 
-    updateBeeps();
-    updateAlarmPulse();      // CHANGED: non-blocking alarm pulse, replaces inputs.buzz(100)
     updateAudioRecording();
 
     if (hasCameraRequest) {
@@ -1070,58 +1034,12 @@ void loop() {
     }
 
     // --- EMERGENCY BUTTON ---
-    if (inputs.isEmergencyHeld()) {
-        if (!emergencyHoldActive) {
-            emergencyHoldActive = true;
-            emergencyHoldStart = millis();
-            emergencyTriggered = false;
-        }
-        else if (!emergencyTriggered && (millis() - emergencyHoldStart >= 3000)) {
-            emergencyTriggered = true;
-            emergencyAlarmActive = true;
-            emergencyAlarmStart = millis();
-
-            if (oledOk) {
-                registerActivity();
-                display.clearDisplay();
-                display.setTextSize(2);
-                display.setCursor(0, 0);
-                display.println("EMERGENCY!");
-                display.display();
-                oledShowingTemp = true;
-                oledRestoreTime = millis() + 5000;
-            }
-
-            gps.update();
-            String latStr = gps.hasFix() ? String(gps.getLat(), 6) : "0.0";
-            String lngStr = gps.hasFix() ? String(gps.getLng(), 6) : "0.0";
-            String eventId = "";
-            if (net.isConnected()) {
-                eventId = net.postEmergency(BUS_ID, latStr.toDouble(), lngStr.toDouble());
-            }
-            gsm.triggerEmergency(BUS_ID, latStr, lngStr);
-            if (eventId != "") {
-                net.postAlertStatus(eventId, "delivered");
-            }
-            // CHANGED: start non-blocking alarm pulse instead of inputs.buzz(100) per-loop
-            startAlarmPulse();
-        }
-    }
-    else {
-        emergencyHoldActive = false;
-        emergencyTriggered = false;
-    }
-
-    if (emergencyAlarmActive) {
-        if (millis() - emergencyAlarmStart >= ALARM_WINDOW_MS) {
-            emergencyAlarmActive = false;
-        }
-    }
+    // Detection (debounce + continuous 3 s hold + re-arm on release) is done by InputManager's task;
+    // it arrives as BTN_EMERGENCY through buttonQueue and is handled in processButtonEvent().
 
     static unsigned long lastGps = 0;
     if (millis() - lastGps > 5000 && audioState == AUDIO_IDLE) {
         lastGps = millis();
-        gps.update();
         if (gps.hasFix() && net.isConnected()) {
             net.postGPS(BUS_ID, gps.getLat(), gps.getLng(), gps.getSpeed(), (gps.getSpeed() > 2.0) ? "Moving" : "Stopped");
         }
@@ -1130,6 +1048,24 @@ void loop() {
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 10000) {
         lastHeartbeat = millis();
-        Serial.printf("[Status] %s | WiFi: %s | OLED: %d\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk);
+        Serial.printf("[Status] %s | WiFi: %s | OLED: %d (awake=%d)\n", BUS_ID.c_str(), net.getStatus().c_str(), oledOk, (int)oledAwake);
+        InputStats is = inputs.getStats();
+        I2CStats i2 = resMgr.getI2CStats();
+        Serial.printf("[Input] healthy=%d raw=0x%02X polls=%lu readFail=%lu maxGap=%lums up=%lu down=%lu sel=%lu long=%lu wake=%lu emerg=%lu qDrop=%lu stackFree=%luB\n",
+                      (int)is.healthy, is.lastRaw, (unsigned long)is.polls, (unsigned long)is.readFailures,
+                      (unsigned long)is.maxPollGapMs, (unsigned long)is.upCount, (unsigned long)is.downCount,
+                      (unsigned long)is.selectShort, (unsigned long)is.selectLong, (unsigned long)is.wakeCount,
+                      (unsigned long)is.emergencyCount, (unsigned long)is.queueDrops, (unsigned long)is.stackFreeBytes);
+        Serial.printf("[I2C] lockTimeouts=%lu mcpReadFail=%lu mcpWriteFail=%lu mcpReconfig=%lu oledSkipped=%lu | loopMaxGap=%lums\n",
+                      (unsigned long)i2.lockTimeouts, (unsigned long)i2.mcpReadFail, (unsigned long)i2.mcpWriteFail,
+                      (unsigned long)i2.mcpReconfig, (unsigned long)oledPushSkipped, (unsigned long)maxLoopGapMs);
+        BuzzerStats bz = buzzer.getStats();
+        Serial.printf("[Buzzer] alarmState=%d beeps=%lu rejected=%lu emergencies=%lu ignored=%lu guardTrips=%lu writeFails=%lu\n",
+                      (int)buzzer.alarmState(), (unsigned long)bz.beepRequests, (unsigned long)bz.beepsRejected,
+                      (unsigned long)bz.emergencyStarts, (unsigned long)bz.emergencyIgnored,
+                      (unsigned long)bz.guardTrips, (unsigned long)bz.writeFails);
+        Serial.printf("[GPS] %s\n", gps.diagLine().c_str());
+        Diag::printHeap("hb");
+        maxLoopGapMs = 0;
     }
 }

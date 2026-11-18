@@ -3,7 +3,7 @@
 Sim800Manager::Sim800Manager(int rxPin, int txPin) {
     _rxPin = rxPin;
     _txPin = txPin;
-    _serial = &Serial1; // Use Hardware Serial 1
+    _serial = &Serial2; // Hardware UART2. Serial1 is reserved for the GPS (was a shared-UART conflict).
     _numberCount = 0;   // No numbers by default
 }
 
